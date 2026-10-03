@@ -181,6 +181,49 @@ done
 expect "ghost packages do not appear in LIST" "$(get action=LIST)" "COUNT: 2"
 
 # ============================================================================
+section "step 3: read-only web frontend"
+H() { curl -si "$@"; }
+curl -s -o /dev/null -X POST -H "X-Rxpip-Name: webpkg" -H "X-Rxpip-Version: 1.2.0" -H "X-Rxpip-Author: <b>Ann</b> & co" \
+  -H "X-Rxpip-Summary: <script>alert(1)</script> \"quoted\" 'single'" -H "X-Rxpip-Requires: mathutils>=1.0.0" \
+  -H "X-Rxpip-Token: $TOKA" --data-binary @"$WORK/strutils.rxpkg" "$BASE?action=PUBLISH"
+curl -s -o /dev/null -X POST -H "X-Rxpip-Name: webpkg" -H "X-Rxpip-Version: 1.3.0" -H "X-Rxpip-Summary: newer" \
+  -H "X-Rxpip-Token: $TOKA" --data-binary @"$WORK/strutils.rxpkg" "$BASE?action=PUBLISH"
+page=$(H "$BASE")
+expect "index is served as HTML" "$page" "Content-Type: text/html"
+expect "index lists packages" "$page" ">mathutils</a>"
+expect "index shows the latest version" "$page" "<td>1.3.0</td>"
+expect "index links to the package page" "$page" "action=PKG&amp;name=webpkg"
+expect "CSP forbids scripts" "$page" "Content-Security-Policy: default-src 'none'"
+expect "nosniff header set" "$page" "X-Content-Type-Options: nosniff"
+expect_not "no script elements in the page" "$page" "<script"
+expect "search finds by name" "$(H "$BASE?q=webp")" ">webpkg</a>"
+expect_not "search excludes non-matches" "$(H "$BASE?q=webp")" ">mathutils</a>"
+expect "search echoes the term escaped" "$(H "$BASE?q=%3Cb%3E")" "No packages found"
+expect_not "search term is not reflected raw" "$(H "$BASE?q=%3Cscript%3E")" "<script>"
+pk=$(H "$BASE?action=PKG&name=webpkg&version=1.2.0")
+expect "package page: HTTP 200" "$pk" "200 OK"
+expect "package page: summary is HTML-escaped" "$pk" "&lt;script&gt;alert(1)&lt;/script&gt; &quot;quoted&quot; &#39;single&#39;"
+expect_not "package page: no raw script tag from metadata" "$pk" "<script>alert"
+expect "package page: author is escaped" "$pk" "&lt;b&gt;Ann&lt;/b&gt; &amp; co"
+expect "package page: install command" "$pk" "rxpip install webpkg==1.2.0"
+expect "package page: owners shown" "$pk" "alice"
+expect "package page: requires is linked" "$pk" "action=PKG&amp;name=mathutils"
+expect "package page: points to the newer version" "$pk" "View 1.3.0"
+expect "package page: download link" "$pk" "action=DOWNLOAD&amp;name=webpkg&amp;version=1.2.0&amp;kind=SOURCE&amp;platform=any"
+expect "package page: version list" "$pk" "version=1.3.0"
+dl=$(printf '%s' "$pk" | grep -o 'href="[^"]*action=DOWNLOAD[^"]*"' | head -1 | sed 's/^href="//; s/"$//; s/&amp;/\&/g')
+curl -s -o "$WORK/webdl.rxpkg" "http://127.0.0.1:$PORT$dl"
+cmp -s "$WORK/webdl.rxpkg" "$WORK/strutils.rxpkg" && ok "the download link on the page serves the artifact" || bad "the download link on the page serves the artifact" "link=$dl"
+expect "latest version is the default" "$(H "$BASE?action=PKG&name=webpkg")" "<h1>webpkg <span class=\"mute\">1.3.0"
+expect "unknown package gives 404" "$(H "$BASE?action=PKG&name=nonesuch")" "404 Not Found"
+expect "unsafe name gives 400" "$(H "$BASE?action=PKG&name=../etc")" "400 Bad Request"
+expect "bad version gives 400" "$(H "$BASE?action=PKG&name=webpkg&version=1/../x")" "400 Bad Request"
+expect "the frontend exposes no token material" "$(printf '%s' "$page$pk")" "rexxpository"
+expect_not "no token or hash in any page" "$(printf '%s' "$page$pk")" "sha256$"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE")
+[ "$code" = 200 ] && ok "POST to the index is harmless" || bad "POST to the index is harmless" "got $code"
+
+# ============================================================================
 section "step 1: concurrent first publish of one name"
 ( pub racepkg 1.0.0 "$TOKA" "$WORK/mathutils.rxpkg"; echo "$CODE" > "$WORK/race1" ) &
 RP1=$!

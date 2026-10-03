@@ -20,6 +20,8 @@
    NetRexx (classic mode).
 
    Actions (via QUERY_STRING):
+     (no action)       HTML package index with search      (?q=<term>)
+     action=PKG       &name=<pkg> [&version=<ver>]  HTML package page
      action=PING
      action=LIST
      action=SEARCH   &q=<term>
@@ -92,6 +94,8 @@ if clen = '' then clen = 0
 action = translate(QGet(qstring, 'ACTION'))
 
 select
+  when action = '' | action = 'HOME' then call Web_Home REPO_ROOT, AUTH_DIR, qstring
+  when action = 'PKG'      then call Web_Package REPO_ROOT, AUTH_DIR, qstring
   when action = 'PING'     then call Action_Ping
   when action = 'LIST'     then call Action_List     REPO_ROOT
   when action = 'SEARCH'   then call Action_Search    REPO_ROOT, qstring
@@ -665,6 +669,176 @@ WriteMetaIfAbsent: procedure
   call stream mf, 'c', 'close'
   return ''
 
+
+/* =======================================================================
+   READ-ONLY WEB FRONTEND
+   -----------------------------------------------------------------------
+   Served by the same CGI script:   <script>            package index + search
+                                    <script>?action=PKG&name=<pkg>[&version=<v>]
+   Pure server-rendered HTML, no JavaScript, no cookies, no state. Every
+   value that came from package metadata is HTML-escaped; a strict
+   Content-Security-Policy forbids scripts and external loads anyway.
+   ======================================================================= */
+
+/* HTML-escape (no CHANGESTR: it is not available in every interpreter) */
+Esc: procedure
+  parse arg s
+  out = ''
+  do i = 1 to length(s)
+    c = substr(s, i, 1)
+    select
+      when c = '&' then out = out || '&amp;'
+      when c = '<' then out = out || '&lt;'
+      when c = '>' then out = out || '&gt;'
+      when c = '"' then out = out || '&quot;'
+      when c = "'" then out = out || '&#39;'
+      otherwise out = out || c
+    end
+  end
+  return out
+
+HtmlHeader: procedure
+  parse arg http, title
+  if http \= 200 then do
+    if http = 404 then say 'Status: 404 Not Found'
+    else if http = 400 then say 'Status: 400 Bad Request'
+    else say 'Status:' http
+  end
+  say 'Content-Type: text/html; charset=utf-8'
+  say "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'"
+  say 'X-Content-Type-Options: nosniff'
+  say 'Referrer-Policy: no-referrer'
+  say ''
+  say '<!doctype html>'
+  say '<html lang="en"><head><meta charset="utf-8">'
+  say '<meta name="viewport" content="width=device-width, initial-scale=1">'
+  say '<title>' || Esc(title) || '</title>'
+  say '<style>'
+  say ':root{--bg:#fff;--fg:#1c1e21;--mute:#667;--line:#dde;--acc:#0b57d0;--code:#f3f4f7}'
+  say '@media (prefers-color-scheme:dark){:root{--bg:#15171a;--fg:#e6e8ea;--mute:#9aa;--line:#2c3036;--acc:#8ab4f8;--code:#20242a}}'
+  say 'body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif}'
+  say 'main{max-width:60rem;margin:0 auto;padding:0 16px 3rem}'
+  say 'header{border-bottom:1px solid var(--line);margin-bottom:1.5rem}'
+  say 'header div{max-width:60rem;margin:0 auto;padding:1rem 16px}'
+  say 'header a{color:var(--fg);font-weight:700;text-decoration:none;font-size:1.25rem}'
+  say 'a{color:var(--acc)} h1{font-size:1.6rem;margin:.2em 0} h2{font-size:1.1rem;margin-top:2rem}'
+  say 'table{border-collapse:collapse;width:100%} th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--line);vertical-align:top}'
+  say 'th{color:var(--mute);font-weight:600;font-size:.85rem}'
+  say 'code,pre{background:var(--code);border-radius:6px;font-family:ui-monospace,monospace;font-size:.9rem}'
+  say 'code{padding:.1em .4em} pre{padding:.7rem .9rem;overflow-x:auto}'
+  say '.mute{color:var(--mute)} form{display:flex;gap:.5rem;margin-bottom:1.25rem}'
+  say 'input[type=search]{flex:1;min-width:0;padding:.55rem .7rem;font-size:1rem;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}'
+  say 'button{padding:.55rem 1rem;font-size:1rem;border-radius:6px;border:1px solid var(--line);background:var(--code);color:var(--fg);cursor:pointer}'
+  say '.tbl{overflow-x:auto} footer{color:var(--mute);font-size:.85rem;margin-top:3rem}'
+  say '</style></head><body>'
+  say '<header><div><a href="' || Esc(value('SCRIPT_NAME',,'ENVIRONMENT')) || '">rexxpository</a> <span class="mute">&middot; the REXX package index</span></div></header>'
+  say '<main>'
+  return
+
+HtmlFooter: procedure
+  say '<footer>RXPIP &middot; install with <code>rxpip install &lt;name&gt;</code></footer>'
+  say '</main></body></html>'
+  return
+
+Web_Home: procedure
+  parse arg root, authdir, qstring
+  self = Esc(value('SCRIPT_NAME',,'ENVIRONMENT'))
+  q = QGet(qstring, 'Q')
+  if \IsSafeMeta(q, 100) then q = ''
+  call HtmlHeader 200, 'rexxpository'
+  say '<h1>Packages</h1>'
+  say '<form method="get" action="' || self || '"><input type="search" name="q" value="' || Esc(q) || '" placeholder="Search packages" aria-label="Search packages"><button type="submit">Search</button></form>'
+  names = PackageNamesStr(root)
+  term = translate(q)
+  shown = 0
+  rows = ''
+  do i = 1 to words(names)
+    nm = word(names, i)
+    ver = LatestVersionOf(root, nm)
+    if ver = '' then iterate
+    ms = MetaStr(root, nm, ver)
+    parse var ms f1 '01'x f2 '01'x f3 '01'x f4 '01'x f5
+    if term \= '' & pos(term, translate(nm f4)) = 0 then iterate
+    shown = shown + 1
+    rows = rows || '<tr><td><a href="' || self || '?action=PKG&amp;name=' || Esc(nm) || '">' || Esc(nm) || '</a></td>' ||,
+           '<td>' || Esc(ver) || '</td><td>' || Esc(f4) || '</td><td class="mute">' || Esc(OwnersStr(authdir, nm)) || '</td></tr>' || '0a'x
+  end
+  if q \= '' then say '<p class="mute">' || shown || ' result(s) for <b>' || Esc(q) || '</b> &middot; <a href="' || self || '">show all</a></p>'
+  if shown = 0 then say '<p>No packages found.</p>'
+  else do
+    say '<div class="tbl"><table><thead><tr><th>Name</th><th>Latest</th><th>Summary</th><th>Owners</th></tr></thead><tbody>'
+    call charout , rows
+    say '</tbody></table></div>'
+  end
+  call HtmlFooter
+  return
+
+Web_Package: procedure
+  parse arg root, authdir, qstring
+  self = Esc(value('SCRIPT_NAME',,'ENVIRONMENT'))
+  name = QGet(qstring, 'NAME')
+  ver = QGet(qstring, 'VERSION')
+  if \IsSafeToken(name) | (ver \= '' & \IsSafeVersion(ver)) then do
+    call HtmlHeader 400, 'Bad request'
+    say '<h1>Bad request</h1><p>Invalid package name or version.</p>'
+    call HtmlFooter
+    return
+  end
+  if ver = '' then ver = LatestVersionOf(root, name)
+  if ver = '' | \FileExists(MetaPath(root, name, ver)) then do
+    call HtmlHeader 404, 'Not found'
+    say '<h1>Not found</h1><p>No such package or version. <a href="' || self || '">Browse all packages</a>.</p>'
+    call HtmlFooter
+    return
+  end
+  latest = LatestVersionOf(root, name)
+  ms = MetaStr(root, name, ver)
+  parse var ms f1 '01'x f2 '01'x f3 '01'x f4 '01'x f5
+  call HtmlHeader 200, name ver
+  say '<h1>' || Esc(name) || ' <span class="mute">' || Esc(ver) || '</span></h1>'
+  if f4 \= '' then say '<p>' || Esc(f4) || '</p>'
+  if ver \= latest then say '<p class="mute">This is not the latest version. <a href="' || self || '?action=PKG&amp;name=' || Esc(name) || '">View ' || Esc(latest) || '</a>.</p>'
+  say '<h2>Install</h2>'
+  say '<pre>rxpip install ' || Esc(name) || '==' || Esc(ver) || '</pre>'
+  say '<p>or in a program: <code>/* REQUIRE ' || Esc(name) || ' */</code></p>'
+  say '<h2>Details</h2><table><tbody>'
+  say '<tr><th>Author</th><td>' || Esc(f3) || '</td></tr>'
+  say '<tr><th>Owners</th><td>' || Esc(OwnersStr(authdir, name)) || '</td></tr>'
+  reqs = ''
+  rq = translate(f5, ' ', ',')
+  do i = 1 to words(rq)
+    w = word(rq, i)
+    parse var w rn '>=' rv
+    reqs = reqs || '<a href="' || self || '?action=PKG&amp;name=' || Esc(rn) || '">' || Esc(w) || '</a> '
+  end
+  if reqs = '' then reqs = '<span class="mute">none</span>'
+  say '<tr><th>Requires</th><td>' || reqs || '</td></tr>'
+  say '</tbody></table>'
+  say '<h2>Files for ' || Esc(ver) || '</h2>'
+  recs = ArtifactsStr(root, name, ver)
+  if recs = '' then say '<p class="mute">No artifacts.</p>'
+  else do
+    say '<div class="tbl"><table><thead><tr><th>Kind</th><th>Platform</th><th>Contains</th><th></th></tr></thead><tbody>'
+    rest = recs
+    do while rest \= ''
+      parse var rest one '0a'x rest
+      if one = '' then iterate
+      parse var one k '01'x p '01'x f
+      dl = self || '?action=DOWNLOAD&amp;name=' || Esc(name) || '&amp;version=' || Esc(ver) || '&amp;kind=' || Esc(k) || '&amp;platform=' || Esc(p)
+      say '<tr><td>' || Esc(k) || '</td><td>' || Esc(p) || '</td><td>' || Esc(f) || '</td><td><a href="' || dl || '">Download</a></td></tr>'
+    end
+    say '</tbody></table></div>'
+  end
+  vs = VersionsStr(root, name)
+  say '<h2>Versions</h2><p>'
+  do i = words(vs) to 1 by -1
+    v = word(vs, i)
+    if v = ver then say '<b>' || Esc(v) || '</b>'
+    else say '<a href="' || self || '?action=PKG&amp;name=' || Esc(name) || '&amp;version=' || Esc(v) || '">' || Esc(v) || '</a>'
+  end
+  say '</p>'
+  call HtmlFooter
+  return
 
 /* =======================================================================
    USERS, TOKENS, INVITES, OWNERS
