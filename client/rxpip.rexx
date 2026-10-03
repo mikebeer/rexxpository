@@ -465,8 +465,15 @@ CmdPublish: procedure expose home
   platform = OptValue(args, 'platform')
   if platform = '' then platform = 'any'
   token = OptValue(args, 'token')
+  if token = '' then token = value('RXPIP_TOKEN',,'ENVIRONMENT')
   if name = '' | ver = '' | token = '' then do
-    say 'rxpip: --name, --version and --token are required'
+    say 'rxpip: --name, --version and a token (--token=T or env RXPIP_TOKEN) are required'
+    exit 1
+    return
+  end
+  if length(token) < 16 | length(token) > 128 | ,
+     verify(token, 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~-') > 0 then do
+    say 'rxpip: token must be 16-128 characters from A-Z a-z 0-9 . _ ~ -'
     exit 1
     return
   end
@@ -676,8 +683,20 @@ ServerPublish: procedure
         '&summary=' || UrlEncode(summary) ||,
         '&requires=' || UrlEncode(requires) ||,
         '&kind=' || UrlEncode(kind) ||,
-        '&platform=' || UrlEncode(platform) ||,
-        '&token=' || UrlEncode(token)
+        '&platform=' || UrlEncode(platform)
+  /* The secret token is NEVER put in the URL (URLs end up in access logs)
+     nor on curl's command line (visible in `ps`): it goes to curl through
+     a private header file (curl -H @file). */
+  hdrfile = TempDir() || '/rxpip_hdr_' || time('L') || '_' || random(1,99999) || '.tmp'
+  if IsWindows() then do
+    call charout hdrfile, 'X-Rxpip-Token: ' || token || '0d0a'x
+    call stream hdrfile, 'c', 'close'
+  end
+  else do
+    call value 'RXPIP_TOKEN_TMP', token, 'ENVIRONMENT'
+    '(umask 077; printf "X-Rxpip-Token: %s\n" "$RXPIP_TOKEN_TMP" > "' || hdrfile || '")'
+    call value 'RXPIP_TOKEN_TMP', '', 'ENVIRONMENT'
+  end
   tmp = TempDir() || '/rxpip_pub_' || time('L') || '_' || random(1,99999) || '.tmp'
   cmd = 'curl -s -o "' || tmp || '" -X POST' ||,
         ' -H "X-Rxpip-Name: ' || name || '"' ||,
@@ -687,10 +706,11 @@ ServerPublish: procedure
         ' -H "X-Rxpip-Requires: ' || requires || '"' ||,
         ' -H "X-Rxpip-Kind: ' || kind || '"' ||,
         ' -H "X-Rxpip-Platform: ' || platform || '"' ||,
-        ' -H "X-Rxpip-Token: ' || token || '"' ||,
+        ' -H @"' || hdrfile || '"' ||,
         ' --data-binary @"' || pkgfile || '"' ||,
         ' "' || url || '"'
   cmd
+  call DelFile hdrfile
   out = ''
   if FileExists(tmp) then do
     do while lines(tmp) > 0
@@ -700,6 +720,7 @@ ServerPublish: procedure
   end
   call DelFile tmp
   say out
+  if out = '' then say 'rxpip: no response from server'
   if word(out,1) = 'STATUS:' & word(out,2) = 'OK' then return 0
   return 1
 

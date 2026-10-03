@@ -67,6 +67,9 @@ signal on novalue name Bomb
 REPO_ROOT = value('RXPIP_REPO_ROOT',,'ENVIRONMENT')
 if REPO_ROOT = '' then REPO_ROOT = '/var/www/rexxpository.org/repo'
 AUTH_DIR  = REPO_ROOT || '/.auth'
+MAX_UPLOAD = value('RXPIP_MAX_UPLOAD',,'ENVIRONMENT')
+if \datatype(MAX_UPLOAD, 'W') then MAX_UPLOAD = 5242880
+if MAX_UPLOAD < 1 then MAX_UPLOAD = 5242880
 
 /* ----- read CGI environment -------------------------------------------*/
 method_   = value('REQUEST_METHOD',,'ENVIRONMENT')
@@ -84,7 +87,7 @@ select
   when action = 'VERSIONS' then call Action_Versions  REPO_ROOT, qstring
   when action = 'ARTIFACTS' then call Action_Artifacts REPO_ROOT, qstring
   when action = 'DOWNLOAD' then call Action_Download  REPO_ROOT, qstring
-  when action = 'PUBLISH'  then call Action_Publish   REPO_ROOT, AUTH_DIR, method_, clen
+  when action = 'PUBLISH'  then call Action_Publish   REPO_ROOT, AUTH_DIR, method_, clen, MAX_UPLOAD
   otherwise do
     call TextHeader
     call ErrorBody 'UNKNOWN_ACTION', "no such action"
@@ -158,6 +161,10 @@ Action_Info:
     return
   end
   ver = QGet(qstring, 'VERSION')
+  if ver \= '' & \IsSafeVersion(ver) then do
+    call ErrorBody 'BAD_VERSION', 'invalid version'
+    return
+  end
   if ver = '' then ver = LatestVersionOf(root, name)
   if ver = '' | \FileExists(MetaPath(root,name,ver)) then do
     call ErrorBody 'NOT_FOUND', "package '" || name || "' not found"
@@ -195,6 +202,10 @@ Action_Artifacts:
     return
   end
   ver = QGet(qstring, 'VERSION')
+  if ver \= '' & \IsSafeVersion(ver) then do
+    call ErrorBody 'BAD_VERSION', 'invalid version'
+    return
+  end
   if ver = '' then ver = LatestVersionOf(root, name)
   if ver = '' then do
     call ErrorBody 'NOT_FOUND', "package '" || name || "' not found"
@@ -226,25 +237,26 @@ Action_Download:
   parse arg root, qstring
   name = QGet(qstring, 'NAME')
   if \IsSafeToken(name) then do
-    call TextHeader
-    call ErrorBody 'BAD_NAME', 'invalid package name'
+    call Fail 400, 'BAD_NAME', 'invalid package name'
     return
   end
   ver = QGet(qstring, 'VERSION')
+  if ver \= '' & \IsSafeVersion(ver) then do
+    call Fail 400, 'BAD_VERSION', 'invalid version'
+    return
+  end
   if ver = '' then ver = LatestVersionOf(root, name)
   kind = QGet(qstring, 'KIND')
   if kind = '' then kind = 'SOURCE'
   platform = QGet(qstring, 'PLATFORM')
   if platform = '' then platform = 'any'
   if \IsSafeKind(kind) | \IsSafeToken(platform) then do
-    call TextHeader
-    call ErrorBody 'BAD_ARTIFACT', 'invalid kind/platform'
+    call Fail 400, 'BAD_ARTIFACT', 'invalid kind/platform'
     return
   end
   artfile = ArtifactPath(root, name, ver, kind, platform)
   if ver = '' | \FileExists(artfile) then do
-    call TextHeader
-    call ErrorBody 'NOT_FOUND', "no " || kind || "/" || platform || " artifact for '" || name || "' " || ver
+    call Fail 404, 'NOT_FOUND', "no " || kind || "/" || platform || " artifact for '" || name || "' " || ver
     return
   end
   sz = stream(artfile, 'c', 'query size')
@@ -257,109 +269,392 @@ Action_Download:
   call charout , data
   return
 
+/* PUBLISH -- hardened:
+   - the secret token is accepted ONLY in the X-Rxpip-Token header; a
+     token in the URL is refused outright (URLs land in access logs)
+   - tokens are stored as sha256$<salt>$<hash>, never in the clear
+   - uploads are size-capped (RXPIP_MAX_UPLOAD, default 5 MiB) before any
+     of the body is read
+   - metadata values are checked for control characters (a newline in a
+     summary would otherwise inject fake fields into PACKAGE.META)
+   - the archive is validated: regular files only, flat safe names
+   - releases are immutable: an existing artifact is never overwritten
+   - the body is staged, validated, then moved into place, and the name
+     is only claimed once the upload has proven good */
 Action_Publish:
-  parse arg root, authdir, method_, clen
-  call TextHeader
+  parse arg root, authdir, method_, clen, maxup
   if translate(method_) \= 'POST' then do
-    call ErrorBody 'METHOD_NOT_ALLOWED', 'publish requires POST'
+    call Fail 405, 'METHOD_NOT_ALLOWED', 'publish requires POST'
     return
   end
-  /* Metadata normally arrives via X-Rxpip-* request headers (which
-     Apache/mod_cgi forwards as HTTP_X_RXPIP_* env vars per the CGI
-     spec). As a fallback -- useful behind proxies or minimal CGI
-     handlers that don't forward custom headers -- the same fields
-     may be supplied on the query string instead; headers win if both
-     are present. */
-  qstring  = value('QUERY_STRING',,'ENVIRONMENT')
-  name     = value('HTTP_X_RXPIP_NAME',,'ENVIRONMENT')
-  if name = '' then name = QGet(qstring, 'NAME')
-  ver      = value('HTTP_X_RXPIP_VERSION',,'ENVIRONMENT')
-  if ver = '' then ver = QGet(qstring, 'VERSION')
-  author   = value('HTTP_X_RXPIP_AUTHOR',,'ENVIRONMENT')
-  if author = '' then author = QGet(qstring, 'AUTHOR')
-  summary  = value('HTTP_X_RXPIP_SUMMARY',,'ENVIRONMENT')
-  if summary = '' then summary = QGet(qstring, 'SUMMARY')
-  requires = value('HTTP_X_RXPIP_REQUIRES',,'ENVIRONMENT')
-  if requires = '' then requires = QGet(qstring, 'REQUIRES')
-  kind     = value('HTTP_X_RXPIP_KIND',,'ENVIRONMENT')
-  if kind = '' then kind = QGet(qstring, 'KIND')
+  qstring = value('QUERY_STRING',,'ENVIRONMENT')
+  if QGet(qstring, 'TOKEN') \= '' then do
+    call Fail 400, 'TOKEN_IN_URL', 'send the token only in the X-Rxpip-Token header, never in the URL (URLs are logged)'
+    return
+  end
+  /* Non-secret metadata normally arrives as X-Rxpip-* headers (Apache
+     forwards them as HTTP_X_RXPIP_*); the query string is accepted as a
+     fallback for handlers that don't forward custom headers. */
+  name     = HdrOrQuery('HTTP_X_RXPIP_NAME', qstring, 'NAME')
+  ver      = HdrOrQuery('HTTP_X_RXPIP_VERSION', qstring, 'VERSION')
+  author   = HdrOrQuery('HTTP_X_RXPIP_AUTHOR', qstring, 'AUTHOR')
+  summary  = HdrOrQuery('HTTP_X_RXPIP_SUMMARY', qstring, 'SUMMARY')
+  requires = HdrOrQuery('HTTP_X_RXPIP_REQUIRES', qstring, 'REQUIRES')
+  kind     = HdrOrQuery('HTTP_X_RXPIP_KIND', qstring, 'KIND')
   if kind = '' then kind = 'SOURCE'
-  platform = value('HTTP_X_RXPIP_PLATFORM',,'ENVIRONMENT')
-  if platform = '' then platform = QGet(qstring, 'PLATFORM')
+  kind     = translate(strip(kind))
+  platform = HdrOrQuery('HTTP_X_RXPIP_PLATFORM', qstring, 'PLATFORM')
   if platform = '' then platform = 'any'
   token    = value('HTTP_X_RXPIP_TOKEN',,'ENVIRONMENT')
-  if token = '' then token = QGet(qstring, 'TOKEN')
 
   if \IsSafeToken(name) then do
-    call ErrorBody 'BAD_NAME', 'invalid or missing package name'
+    call Fail 400, 'BAD_NAME', 'invalid or missing package name'
     return
   end
   if \IsSafeVersion(ver) then do
-    call ErrorBody 'BAD_VERSION', 'invalid/missing version (expected dotted numeric, e.g. 1.2.0)'
+    call Fail 400, 'BAD_VERSION', 'invalid/missing version (expected dotted numeric, e.g. 1.2.0)'
     return
   end
   if \IsSafeKind(kind) then do
-    call ErrorBody 'BAD_KIND', 'kind must be SOURCE or BYTECODE'
+    call Fail 400, 'BAD_KIND', 'kind must be SOURCE or BYTECODE'
     return
   end
   if \IsSafeToken(platform) then do
-    call ErrorBody 'BAD_PLATFORM', 'invalid platform tag'
+    call Fail 400, 'BAD_PLATFORM', 'invalid platform tag'
+    return
+  end
+  if \IsSafeMeta(author, 100) | \IsSafeMeta(summary, 200) then do
+    call Fail 400, 'BAD_METADATA', 'author (max 100) and summary (max 200) must be plain text without control characters'
+    return
+  end
+  if \IsSafeRequires(requires) then do
+    call Fail 400, 'BAD_REQUIRES', 'requires must be space/comma separated "name" or "name>=version" entries'
     return
   end
   if token = '' then do
-    call ErrorBody 'NO_TOKEN', 'publish requires X-Rxpip-Token header'
+    call Fail 401, 'NO_TOKEN', 'publish requires the X-Rxpip-Token header'
     return
   end
-  if clen = 0 | clen = '' then do
-    call ErrorBody 'EMPTY_BODY', 'no package data received'
+  if \IsSafeSecret(token) then do
+    call Fail 401, 'BAD_TOKEN', 'token must be 16-128 characters from A-Z a-z 0-9 . _ ~ -'
+    return
+  end
+  if \datatype(clen, 'W') then clen = 0
+  if clen < 1 then do
+    call Fail 400, 'EMPTY_BODY', 'no package data received'
+    return
+  end
+  if clen > maxup then do
+    call Fail 413, 'TOO_LARGE', 'artifact exceeds the ' || maxup || ' byte upload limit'
+    return
+  end
+  if Sha256Hex('rxpip') = '' then do
+    call Fail 500, 'SERVER_NO_HASH', 'server has no SHA-256 tool (sha256sum, shasum or PowerShell)'
     return
   end
 
   call EnsureDir authdir
   ownerfile = authdir || '/' || name || '.owner'
+  claiming = 0
   if FileExists(ownerfile) then do
-    owned = linein(ownerfile)
-    call stream ownerfile, 'c', 'close'
-    if owned \= token then do
-      call ErrorBody 'FORBIDDEN', "token does not match existing owner of '" || name || "'"
+    if \OwnerMatches(ownerfile, token) then do
+      call Fail 403, 'FORBIDDEN', "token does not match the owner of '" || name || "'"
       return
     end
   end
-  else do
-    call charout ownerfile, token
-    call stream ownerfile, 'c', 'close'
+  else claiming = 1
+
+  artfile = ArtifactPath(root, name, ver, kind, platform)
+  if FileExists(artfile) then do
+    call Fail 409, 'ALREADY_EXISTS', kind || '/' || platform || ' artifact for ' || name || ' ' || ver || ' already exists; releases are immutable - publish a new version'
+    return
   end
 
-  artdir = root || '/' || name || '/' || ver || '/artifacts'
-  call EnsureDir artdir
-  artfile = ArtifactPath(root, name, ver, kind, platform)
-
+  /* stage inside the repo (same filesystem, so the final move is an atomic
+     rename) but outside any package directory, so a rejected upload leaves
+     no trace; dot-directories are never listed as packages */
+  stagedir = root || '/.staging'
+  call EnsureDir stagedir
+  stage = stagedir || '/upload_' || time('L') || '_' || random(1,99999) || '.tmp'
   data = charin(, , clen)
-  call charout artfile, data
-  call stream artfile, 'c', 'close'
+  if length(data) \= clen then do
+    call Fail 400, 'SHORT_BODY', 'received fewer bytes than Content-Length announced'
+    return
+  end
+  call charout stage, data
+  call stream stage, 'c', 'close'
+  data = ''
 
-  filelist = ListTarContents(artfile)
+  v = ValidateArchive(stage)
+  parse var v vstat '01'x vrest
+  if vstat \= 'OK' then do
+    call DelFile stage
+    call Fail 400, 'BAD_ARCHIVE', vrest
+    return
+  end
+  filelist = vrest
+
+  if claiming then do
+    rec = MakeSecretRecord(token)
+    if rec = '' then do
+      call DelFile stage
+      call Fail 500, 'SERVER_NO_RANDOM', 'server could not obtain secure random bytes to salt the token'
+      return
+    end
+    if \WriteNew(ownerfile, rec) then do
+      /* lost a race with a concurrent first publish of the same name */
+      if \OwnerMatches(ownerfile, token) then do
+        call DelFile stage
+        call Fail 403, 'FORBIDDEN', "'" || name || "' was claimed by someone else just now"
+        return
+      end
+    end
+  end
+
+  call EnsureDir root || '/' || name || '/' || ver || '/artifacts'
+  call MoveFile stage, artfile
   call WriteArtifactRecord root, name, ver, kind, platform, filelist
+  note = WriteMetaIfAbsent(root, name, ver, author, summary, requires)
 
-  metafile = MetaPath(root, name, ver)
-  call charout metafile, 'NAME:' name || '0a'x
-  call charout metafile, 'VERSION:' ver || '0a'x
-  call charout metafile, 'AUTHOR:' author || '0a'x
-  call charout metafile, 'SUMMARY:' summary || '0a'x
-  call charout metafile, 'REQUIRES:' requires || '0a'x
-  call stream metafile, 'c', 'close'
-
+  call TextHeader
   say 'STATUS: OK'
   say 'NAME:' name
   say 'VERSION:' ver
   say 'KIND:' kind
   say 'PLATFORM:' platform
+  if note \= '' then say 'NOTE:' note
   say 'MESSAGE: published'
   return
 
 /* =======================================================================
    HELPERS  (all self-contained -- return plain strings, no shared stems)
    ======================================================================= */
+
+/* an HTTP error: Status header + plain-text STATUS/CODE/MESSAGE body */
+Fail: procedure
+  parse arg http, code, msg
+  select
+    when http = 400 then reason = 'Bad Request'
+    when http = 401 then reason = 'Unauthorized'
+    when http = 403 then reason = 'Forbidden'
+    when http = 404 then reason = 'Not Found'
+    when http = 405 then reason = 'Method Not Allowed'
+    when http = 409 then reason = 'Conflict'
+    when http = 413 then reason = 'Payload Too Large'
+    otherwise reason = 'Internal Server Error'
+  end
+  say 'Status:' http reason
+  say 'Content-Type: text/plain; charset=utf-8'
+  say ''
+  say 'STATUS: ERROR'
+  say 'CODE:' code
+  say 'MESSAGE:' msg
+  return
+
+/* request header (CGI env var) with query-string fallback; NOT for secrets */
+HdrOrQuery: procedure
+  parse arg envname, qs, key
+  v = value(envname,,'ENVIRONMENT')
+  if v = '' then v = QGet(qs, key)
+  return v
+
+/* secrets: 16-128 chars of A-Z a-z 0-9 . _ ~ -  (also keeps shell-safe) */
+IsSafeSecret: procedure
+  parse arg t
+  if length(t) < 16 | length(t) > 128 then return 0
+  return verify(t, 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~-') = 0
+
+/* free-text metadata: length-capped, no control characters (CR/LF/NUL
+   etc. would let a value break out of its line in the META files) */
+IsSafeMeta: procedure
+  parse arg s, maxlen
+  if length(s) > maxlen then return 0
+  ctl = xrange('00'x, '1f'x) || '7f'x
+  return verify(s, ctl, 'M') = 0
+
+/* "name" or "name>=version" entries separated by blanks and/or commas */
+IsSafeRequires: procedure
+  parse arg r
+  if \IsSafeMeta(r, 500) then return 0
+  r = translate(r, ' ', ',')
+  do i = 1 to words(r)
+    w = word(r, i)
+    n = w
+    v = ''
+    if pos('>=', w) > 0 then parse var w n '>=' v
+    if \IsSafeToken(n) then return 0
+    if pos('>=', w) > 0 & \IsSafeVersion(v) then return 0
+  end
+  return 1
+
+/* a member name inside an uploaded archive: flat, no leading dot */
+IsSafeFileName: procedure
+  parse arg n
+  if n = '' | length(n) > 100 then return 0
+  if left(n,1) = '.' then return 0
+  return verify(n, 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-') = 0
+
+/* ---- crypto helpers -------------------------------------------------
+   Secrets travel to child processes through an environment variable, never
+   on a command line (visible in `ps`) and never via a temp file. Failure
+   is reported as '' and callers must fail closed -- in particular
+   RandomHex never falls back to a weak PRNG. */
+
+IsHex: procedure
+  parse arg h, n
+  return length(h) = n & datatype(h, 'X')
+
+Lower: procedure
+  parse arg s
+  return translate(s, 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+
+/* SHA-256 of a string as 64 lowercase hex chars, or '' if no tool works */
+Sha256Hex: procedure
+  parse arg s
+  call value 'RXPIP_HASH_IN', s, 'ENVIRONMENT'
+  first = ''
+  if IsWindows() then do
+    address system 'powershell -NoProfile -NonInteractive -Command "$b=[Text.Encoding]::UTF8.GetBytes($env:RXPIP_HASH_IN);([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($b)) -replace ''-'','''').ToLower()"' with output stem o.
+    if o.0 >= 1 then first = word(o.1, 1)
+  end
+  else do
+    address system 'printf %s "$RXPIP_HASH_IN" | sha256sum 2>/dev/null' with output stem o.
+    if o.0 >= 1 then first = word(o.1, 1)
+    if \IsHex(first, 64) then do
+      /* macOS and BSD ship shasum rather than sha256sum */
+      address system 'printf %s "$RXPIP_HASH_IN" | shasum -a 256 2>/dev/null' with output stem o.
+      first = ''
+      if o.0 >= 1 then first = word(o.1, 1)
+    end
+  end
+  call value 'RXPIP_HASH_IN', '', 'ENVIRONMENT'
+  if \IsHex(first, 64) then return ''
+  return Lower(first)
+
+/* n cryptographically random bytes as 2n hex chars, or '' on failure */
+RandomHex: procedure
+  parse arg n
+  if IsWindows() then do
+    address system 'powershell -NoProfile -NonInteractive -Command "$b=New-Object byte[] ' || n || ';[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b);(($b|ForEach-Object{$_.ToString(''x2'')}) -join '''')"' with output stem o.
+  end
+  else do
+    address system 'head -c ' || n || ' /dev/urandom | od -An -tx1 | tr -d " \n"' with output stem o.
+  end
+  r = ''
+  if o.0 >= 1 then r = word(o.1, 1)
+  if \IsHex(r, 2 * n) then return ''
+  return Lower(r)
+
+/* "sha256$<salt>$<hash>" for a token, or '' if randomness is unavailable */
+MakeSecretRecord: procedure
+  parse arg token
+  salt = RandomHex(16)
+  if salt = '' then return ''
+  h = Sha256Hex(salt || token)
+  if h = '' then return ''
+  return 'sha256$' || salt || '$' || h
+
+/* does token match a stored "sha256$salt$hash" record? (0 on any doubt) */
+VerifySecret: procedure
+  parse arg token, rec
+  parse var rec scheme '$' salt '$' h
+  if scheme \= 'sha256' then return 0
+  if \IsHex(salt, 32) | \IsHex(h, 64) then return 0
+  calc = Sha256Hex(salt || token)
+  return calc \= '' & calc = Lower(h)
+
+OwnerMatches: procedure
+  parse arg ownerfile, token
+  rec = ''
+  if FileExists(ownerfile) then do
+    rec = strip(linein(ownerfile))
+    call stream ownerfile, 'c', 'close'
+  end
+  return VerifySecret(token, rec)
+
+/* create file with content only if it does not exist yet; 1 = created.
+   Unix uses a noclobber redirect, which is atomic. Windows has no such
+   shell primitive, so there it is check-then-write (small race window). */
+WriteNew: procedure
+  parse arg file, content
+  if IsWindows() then do
+    if FileExists(file) then return 0
+    call charout file, content
+    call stream file, 'c', 'close'
+    return 1
+  end
+  call value 'RXPIP_NEW_CONTENT', content, 'ENVIRONMENT'
+  address system '(set -C; printf %s "$RXPIP_NEW_CONTENT" > "' || file || '") 2>/dev/null'
+  ok = (rc = 0)
+  call value 'RXPIP_NEW_CONTENT', '', 'ENVIRONMENT'
+  return ok
+
+/* Validate an uploaded .rxpkg (gzip'd tar): at most 200 members, regular
+   files only (no symlinks/hardlinks/devices), top-level only, safe names.
+   Returns 'OK' '01'x 'space separated file list'  or  'ERR' '01'x 'why'. */
+ValidateArchive: procedure
+  parse arg f
+  nul = NullSink()
+  tn = TempDir() || '/rxpip_vn_' || time('L') || '_' || random(1,99999) || '.tmp'
+  tv = TempDir() || '/rxpip_vv_' || time('L') || '_' || random(1,99999) || '.tmp'
+  'tar tzf "' || f || '" 2>' || nul || ' >"' || tn || '"'
+  'tar tvzf "' || f || '" 2>' || nul || ' >"' || tv || '"'
+  nn = 0
+  nv = 0
+  if FileExists(tn) then do
+    do while lines(tn) > 0
+      nn = nn + 1
+      nm.nn = linein(tn)
+    end
+    call stream tn, 'c', 'close'
+  end
+  if FileExists(tv) then do
+    do while lines(tv) > 0
+      nv = nv + 1
+      vl.nv = linein(tv)
+    end
+    call stream tv, 'c', 'close'
+  end
+  call DelFile tn
+  call DelFile tv
+  if nn = 0 then return 'ERR' || '01'x || 'not a readable gzip-compressed tar archive, or it is empty'
+  if nn \= nv then return 'ERR' || '01'x || 'archive listing is inconsistent (unusual member names?)'
+  if nn > 200 then return 'ERR' || '01'x || 'archive has more than 200 members'
+  files = ''
+  do i = 1 to nn
+    t = left(vl.i, 1)
+    if t \= '-' & t \= 'd' then return 'ERR' || '01'x || 'archive contains a link or special file; only regular files are allowed'
+    n = strip(nm.i)
+    if left(n, 2) = './' then n = substr(n, 3)
+    if right(n, 1) = '/' then n = left(n, length(n) - 1)
+    if n = '' | n = '.' then iterate
+    if t = 'd' then return 'ERR' || '01'x || 'archive contains a directory; files must be at the top level'
+    if \IsSafeFileName(n) then return 'ERR' || '01'x || 'unsafe or nested file name in archive: ' || left(n, 40)
+    files = files n
+  end
+  files = strip(files)
+  if files = '' then return 'ERR' || '01'x || 'archive contains no files'
+  return 'OK' || '01'x || files
+
+/* PACKAGE.META describes a version and is written once, by its first
+   artifact. Later artifacts of the same version (e.g. a BYTECODE one) must
+   not rewrite it; returns a NOTE if their metadata differs. */
+WriteMetaIfAbsent: procedure
+  parse arg root, name, ver, author, summary, requires
+  mf = MetaPath(root, name, ver)
+  mine = name || '01'x || ver || '01'x || author || '01'x || summary || '01'x || requires
+  if FileExists(mf) then do
+    if MetaStr(root, name, ver) \= mine then return 'metadata for this version was already set by its first artifact and was left unchanged'
+    return ''
+  end
+  call charout mf, 'NAME:' name || '0a'x
+  call charout mf, 'VERSION:' ver || '0a'x
+  call charout mf, 'AUTHOR:' author || '0a'x
+  call charout mf, 'SUMMARY:' summary || '0a'x
+  call charout mf, 'REQUIRES:' requires || '0a'x
+  call stream mf, 'c', 'close'
+  return ''
+
 
 TextHeader: procedure
   say 'Content-Type: text/plain; charset=utf-8'
@@ -615,7 +910,7 @@ PackageNamesStr: procedure
   do while lines(tmp) > 0
     l = strip(linein(tmp))
     if l = '' then iterate
-    if l = '.auth' then iterate
+    if left(l,1) = '.' then iterate
     if \FileIsDir(root || '/' || l) then iterate
     out = out || l || ' '
   end
@@ -711,27 +1006,6 @@ EmitStanza: procedure
   say 'REQUIRES:' freq
   say ''
   return
-
-ListTarContents: procedure
-  /* tar itself: Windows 10 1803+ / Server 2019+ ships a bsdtar-
-     compatible tar.exe in System32 that accepts the same tzf/czf/xzf
-     syntax as Unix tar, so this command line is unchanged across
-     platforms -- only the null-device name for discarding stderr
-     differs. On an older Windows host without tar.exe on PATH, install
-     one (e.g. via bsdtar or Git for Windows) and this still works. */
-  parse arg pkgfile
-  tmp = TempDir() || '/rxpip_tar_' || time('L') || '_' || random(1,99999) || '.tmp'
-  'tar tzf "' || pkgfile || '" 2>' || NullSink() || ' >"' || tmp || '"'
-  out = ''
-  do while lines(tmp) > 0
-    l = strip(linein(tmp))
-    if l = '' then iterate
-    if right(l,1) = '/' then iterate
-    out = out || l || ' '
-  end
-  call stream tmp, 'c', 'close'
-  call DelFile tmp
-  return strip(out)
 
 RexxVersionShort: procedure
   parse version v
