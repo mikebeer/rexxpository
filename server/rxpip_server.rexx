@@ -28,6 +28,12 @@
      action=ARTIFACTS &name=<pkg>            [&version=<ver>]
      action=DOWNLOAD  &name=<pkg>            [&version=<ver>]
                        [&kind=<SOURCE|BYTECODE>] [&platform=<tag>]
+     action=OWNERS    &name=<pkg>            -> OWNERS: user user ...
+     -- the following are POST + X-Rxpip-Token header (a user token) --
+     action=REGISTER  X-Rxpip-Invite, X-Rxpip-User   (invite-only sign-up;
+                       returns the first token, shown once; no token needed)
+     action=WHOAMI | TOKENS | NEWTOKEN [X-Rxpip-Label] | REVOKE [X-Rxpip-Token-Id]
+     action=ADDOWNER | REMOVEOWNER   X-Rxpip-Name, X-Rxpip-User
      action=PUBLISH   (POST body = raw artifact bytes; metadata via headers
                        X-Rxpip-Name, X-Rxpip-Version, X-Rxpip-Author,
                        X-Rxpip-Summary, X-Rxpip-Requires, X-Rxpip-Kind,
@@ -71,6 +77,12 @@ MAX_UPLOAD = value('RXPIP_MAX_UPLOAD',,'ENVIRONMENT')
 if \datatype(MAX_UPLOAD, 'W') then MAX_UPLOAD = 5242880
 if MAX_UPLOAD < 1 then MAX_UPLOAD = 5242880
 
+/* ----- command-line admin mode (never reachable through CGI) ----------- */
+if value('GATEWAY_INTERFACE',,'ENVIRONMENT') = '' then do
+  call AdminMain AUTH_DIR, CliArgs(arg(1), arg(2), arg(3), arg(4), arg(5), arg(6), arg(7))
+  exit 0
+end
+
 /* ----- read CGI environment -------------------------------------------*/
 method_   = value('REQUEST_METHOD',,'ENVIRONMENT')
 qstring   = value('QUERY_STRING',,'ENVIRONMENT')
@@ -87,6 +99,14 @@ select
   when action = 'VERSIONS' then call Action_Versions  REPO_ROOT, qstring
   when action = 'ARTIFACTS' then call Action_Artifacts REPO_ROOT, qstring
   when action = 'DOWNLOAD' then call Action_Download  REPO_ROOT, qstring
+  when action = 'REGISTER' then call Action_Register  AUTH_DIR, method_
+  when action = 'WHOAMI'   then call Action_Whoami    AUTH_DIR, method_
+  when action = 'NEWTOKEN' then call Action_NewToken  AUTH_DIR, method_
+  when action = 'TOKENS'   then call Action_Tokens    AUTH_DIR, method_
+  when action = 'REVOKE'   then call Action_Revoke    AUTH_DIR, method_
+  when action = 'OWNERS'   then call Action_Owners    AUTH_DIR, qstring
+  when action = 'ADDOWNER' then call Action_ChangeOwner AUTH_DIR, method_, 'ADD'
+  when action = 'REMOVEOWNER' then call Action_ChangeOwner AUTH_DIR, method_, 'REMOVE'
   when action = 'PUBLISH'  then call Action_Publish   REPO_ROOT, AUTH_DIR, method_, clen, MAX_UPLOAD
   otherwise do
     call TextHeader
@@ -353,12 +373,17 @@ Action_Publish:
     return
   end
 
-  call EnsureDir authdir
-  ownerfile = authdir || '/' || name || '.owner'
+  user = AuthUser(authdir, token)
+  if user = '' then do
+    call Fail 401, 'BAD_TOKEN', 'unknown or revoked token (create an account with an invite: rxpip register)'
+    return
+  end
+  call EnsureDir authdir || '/owners'
+  ownersfile = authdir || '/owners/' || name || '.owners'
   claiming = 0
-  if FileExists(ownerfile) then do
-    if \OwnerMatches(ownerfile, token) then do
-      call Fail 403, 'FORBIDDEN', "token does not match the owner of '" || name || "'"
+  if FileExists(ownersfile) then do
+    if \IsOwner(authdir, name, user) then do
+      call Fail 403, 'FORBIDDEN', "'" || user || "' is not an owner of '" || name || "'"
       return
     end
   end
@@ -395,15 +420,9 @@ Action_Publish:
   filelist = vrest
 
   if claiming then do
-    rec = MakeSecretRecord(token)
-    if rec = '' then do
-      call DelFile stage
-      call Fail 500, 'SERVER_NO_RANDOM', 'server could not obtain secure random bytes to salt the token'
-      return
-    end
-    if \WriteNew(ownerfile, rec) then do
+    if \WriteNew(ownersfile, user || '0a'x) then do
       /* lost a race with a concurrent first publish of the same name */
-      if \OwnerMatches(ownerfile, token) then do
+      if \IsOwner(authdir, name, user) then do
         call DelFile stage
         call Fail 403, 'FORBIDDEN', "'" || name || "' was claimed by someone else just now"
         return
@@ -563,15 +582,6 @@ VerifySecret: procedure
   calc = Sha256Hex(salt || token)
   return calc \= '' & calc = Lower(h)
 
-OwnerMatches: procedure
-  parse arg ownerfile, token
-  rec = ''
-  if FileExists(ownerfile) then do
-    rec = strip(linein(ownerfile))
-    call stream ownerfile, 'c', 'close'
-  end
-  return VerifySecret(token, rec)
-
 /* create file with content only if it does not exist yet; 1 = created.
    Unix uses a noclobber redirect, which is atomic. Windows has no such
    shell primitive, so there it is check-then-write (small race window). */
@@ -655,6 +665,517 @@ WriteMetaIfAbsent: procedure
   call stream mf, 'c', 'close'
   return ''
 
+
+/* =======================================================================
+   USERS, TOKENS, INVITES, OWNERS
+   -----------------------------------------------------------------------
+   Layout under AUTH_DIR (outside the web root; never served):
+     users/<user>.user      CREATED:
+     tokens/<id>.tok        USER: / LABEL: / CREATED: / HASH: sha256$salt$hash
+     invites/<id>.inv       NOTE: / CREATED: / HASH:      (.used once redeemed)
+     owners/<pkg>.owners    one username per line
+   A token is  rxp_<8 hex id>_<48 hex secret>  (server generated, shown
+   exactly once). The id locates the record in O(1); the whole token is
+   verified against the salted hash. Invites look like inv_<id>_<32 hex>.
+   Because tokens carry 192 bits of server-chosen randomness, a single
+   salted SHA-256 is adequate (a slow KDF only matters for human-chosen
+   passwords, and none exist in this design).
+   ======================================================================= */
+
+/* usernames: 3-32 chars, lowercase letters, digits, '-' and '_'; lowercase
+   only so that case-insensitive filesystems cannot alias two users */
+IsSafeUser: procedure
+  parse arg u
+  if length(u) < 3 | length(u) > 32 then return 0
+  if verify(u, 'abcdefghijklmnopqrstuvwxyz0123456789_-') > 0 then return 0
+  return left(u, 1) \= '-'
+
+/* value of "KEY: value" in a small record file ('' if absent) */
+FileField: procedure
+  parse arg file, key
+  res = ''
+  if \FileExists(file) then return ''
+  do while lines(file) > 0
+    l = linein(file)
+    parse var l k ':' v
+    if translate(strip(k)) = translate(key) then do
+      res = strip(v)
+      leave
+    end
+  end
+  call stream file, 'c', 'close'
+  return res
+
+/* atomically replace a file's content (write temp, then rename) */
+ReplaceFile: procedure
+  parse arg file, content
+  tmp = file || '.tmp' || time('L') || random(1, 99999)
+  call charout tmp, content
+  call stream tmp, 'c', 'close'
+  call MoveFile tmp, file
+  return
+
+/* space-separated file names in dir that end in suffix, suffix removed */
+DirBasesStr: procedure
+  parse arg dir, suffix
+  if \FileIsDir(dir) then return ''
+  tmp = TempDir() || '/rxpip_db_' || time('L') || '_' || random(1,99999) || '.tmp'
+  call ListDirNames dir, tmp
+  out = ''
+  do while lines(tmp) > 0
+    l = strip(linein(tmp))
+    if length(l) <= length(suffix) then iterate
+    if right(l, length(suffix)) \= suffix then iterate
+    out = out || left(l, length(l) - length(suffix)) || ' '
+  end
+  call stream tmp, 'c', 'close'
+  call DelFile tmp
+  return strip(out)
+
+UserExists: procedure
+  parse arg authdir, u
+  return IsSafeUser(u) & FileExists(authdir || '/users/' || u || '.user')
+
+/* ---- tokens ---- */
+
+/* username owning a valid token, or '' (unknown, revoked, malformed all
+   look the same to the caller) */
+AuthUser: procedure
+  parse arg authdir, token
+  parse var token pre '_' id '_' sec
+  if pre \= 'rxp' | \IsHex(id, 8) | \IsHex(sec, 48) then return ''
+  f = authdir || '/tokens/' || id || '.tok'
+  if \FileExists(f) then return ''
+  if \VerifySecret(token, FileField(f, 'HASH')) then return ''
+  u = FileField(f, 'USER')
+  if \UserExists(authdir, u) then return ''
+  return u
+
+/* mint a token for user; returns the token (the ONLY time it exists in
+   clear) or '' on failure */
+CreateToken: procedure
+  parse arg authdir, user, label
+  call EnsureDir authdir || '/tokens'
+  do try = 1 to 5
+    id = RandomHex(4)
+    sec = RandomHex(24)
+    if id = '' | sec = '' then return ''
+    tok = 'rxp_' || id || '_' || sec
+    rec = MakeSecretRecord(tok)
+    if rec = '' then return ''
+    c = 'USER: ' || user || '0a'x || 'LABEL: ' || label || '0a'x ||,
+        'CREATED: ' || date('S') || ' ' || time() || '0a'x ||,
+        'HASH: ' || rec || '0a'x
+    if WriteNew(authdir || '/tokens/' || id || '.tok', c) then return tok
+  end
+  return ''
+
+/* ids (space separated) of the tokens belonging to user */
+UserTokenIds: procedure
+  parse arg authdir, user
+  ids = DirBasesStr(authdir || '/tokens', '.tok')
+  out = ''
+  do i = 1 to words(ids)
+    id = word(ids, i)
+    if FileField(authdir || '/tokens/' || id || '.tok', 'USER') = user then out = out id
+  end
+  return strip(out)
+
+/* ---- invites ---- */
+
+CreateInvite: procedure
+  parse arg authdir, note
+  call EnsureDir authdir || '/invites'
+  do try = 1 to 5
+    id = RandomHex(4)
+    sec = RandomHex(16)
+    if id = '' | sec = '' then return ''
+    inv = 'inv_' || id || '_' || sec
+    rec = MakeSecretRecord(inv)
+    if rec = '' then return ''
+    c = 'NOTE: ' || note || '0a'x || 'CREATED: ' || date('S') || ' ' || time() || '0a'x ||,
+        'HASH: ' || rec || '0a'x
+    if WriteNew(authdir || '/invites/' || id || '.inv', c) then return inv
+  end
+  return ''
+
+/* claim an invite: 1 if this caller consumed it. The claim is a rename,
+   which only one of several concurrent callers can win (on Unix). */
+RedeemInvite: procedure
+  parse arg authdir, inv
+  parse var inv pre '_' id '_' sec
+  if pre \= 'inv' | \IsHex(id, 8) | \IsHex(sec, 32) then return 0
+  f = authdir || '/invites/' || id || '.inv'
+  if \FileExists(f) then return 0
+  if \VerifySecret(inv, FileField(f, 'HASH')) then return 0
+  if IsWindows() then 'move "' || translate(f,'\','/') || '" "' || translate(f,'\','/') || '.used" >nul 2>nul'
+  else 'mv "' || f || '" "' || f || '.used" 2>/dev/null'
+  return rc = 0
+
+UnredeemInvite: procedure
+  parse arg authdir, inv
+  parse var inv pre '_' id '_' sec
+  f = authdir || '/invites/' || id || '.inv'
+  call MoveFile f || '.used', f
+  return
+
+/* ---- owners ---- */
+
+OwnersStr: procedure
+  parse arg authdir, pkg
+  f = authdir || '/owners/' || pkg || '.owners'
+  out = ''
+  if FileExists(f) then do
+    do while lines(f) > 0
+      l = strip(linein(f))
+      if l \= '' then out = out l
+    end
+    call stream f, 'c', 'close'
+  end
+  return strip(out)
+
+IsOwner: procedure
+  parse arg authdir, pkg, user
+  return wordpos(user, OwnersStr(authdir, pkg)) > 0
+
+WriteOwners: procedure
+  parse arg authdir, pkg, list
+  call EnsureDir authdir || '/owners'
+  c = ''
+  do i = 1 to words(list)
+    c = c || word(list, i) || '0a'x
+  end
+  call ReplaceFile authdir || '/owners/' || pkg || '.owners', c
+  return
+
+/* ---- HTTP actions that need a logged-in user ---- */
+
+/* common gate: POST only, token only in the header; returns the username,
+   or '' after having already sent the error response */
+Authenticate: procedure
+  parse arg authdir, method_
+  if translate(method_) \= 'POST' then do
+    call Fail 405, 'METHOD_NOT_ALLOWED', 'this action requires POST'
+    return ''
+  end
+  if QGet(value('QUERY_STRING',,'ENVIRONMENT'), 'TOKEN') \= '' then do
+    call Fail 400, 'TOKEN_IN_URL', 'send the token only in the X-Rxpip-Token header, never in the URL (URLs are logged)'
+    return ''
+  end
+  token = value('HTTP_X_RXPIP_TOKEN',,'ENVIRONMENT')
+  if token = '' then do
+    call Fail 401, 'NO_TOKEN', 'this action requires the X-Rxpip-Token header'
+    return ''
+  end
+  if \IsSafeSecret(token) then do
+    call Fail 401, 'BAD_TOKEN', 'malformed token'
+    return ''
+  end
+  if Sha256Hex('rxpip') = '' then do
+    call Fail 500, 'SERVER_NO_HASH', 'server has no SHA-256 tool (sha256sum, shasum or PowerShell)'
+    return ''
+  end
+  u = AuthUser(authdir, token)
+  if u = '' then call Fail 401, 'BAD_TOKEN', 'unknown or revoked token'
+  return u
+
+/* a response that carries a secret must never be cached */
+SecretHeader: procedure
+  say 'Content-Type: text/plain; charset=utf-8'
+  say 'Cache-Control: no-store'
+  say ''
+  return
+
+/* invite-only sign-up: X-Rxpip-Invite + X-Rxpip-User -> user and first token */
+Action_Register: procedure
+  parse arg authdir, method_
+  if translate(method_) \= 'POST' then do
+    call Fail 405, 'METHOD_NOT_ALLOWED', 'register requires POST'
+    return
+  end
+  inv = value('HTTP_X_RXPIP_INVITE',,'ENVIRONMENT')
+  user = value('HTTP_X_RXPIP_USER',,'ENVIRONMENT')
+  if \IsSafeUser(user) then do
+    call Fail 400, 'BAD_USER', 'username must be 3-32 characters: a-z 0-9 _ - (lowercase)'
+    return
+  end
+  if length(inv) > 128 | verify(inv, 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_') > 0 | inv = '' then do
+    call Fail 403, 'BAD_INVITE', 'invalid, used or missing invite code'
+    return
+  end
+  if Sha256Hex('rxpip') = '' then do
+    call Fail 500, 'SERVER_NO_HASH', 'server has no SHA-256 tool'
+    return
+  end
+  if UserExists(authdir, user) then do
+    call Fail 409, 'USER_EXISTS', "user '" || user || "' already exists"
+    return
+  end
+  if \RedeemInvite(authdir, inv) then do
+    call Fail 403, 'BAD_INVITE', 'invalid, used or missing invite code'
+    return
+  end
+  call EnsureDir authdir || '/users'
+  if \WriteNew(authdir || '/users/' || user || '.user', 'CREATED: ' || date('S') || ' ' || time() || '0a'x) then do
+    call UnredeemInvite authdir, inv
+    call Fail 409, 'USER_EXISTS', "user '" || user || "' already exists"
+    return
+  end
+  tok = CreateToken(authdir, user, 'registration')
+  if tok = '' then do
+    call DelFile authdir || '/users/' || user || '.user'
+    call UnredeemInvite authdir, inv
+    call Fail 500, 'SERVER_NO_RANDOM', 'server could not create a token'
+    return
+  end
+  call SecretHeader
+  say 'STATUS: OK'
+  say 'USER:' user
+  say 'TOKEN:' tok
+  say 'MESSAGE: account created. Store this token now; it is shown only once.'
+  return
+
+Action_Whoami: procedure
+  parse arg authdir, method_
+  u = Authenticate(authdir, method_)
+  if u = '' then return
+  call TextHeader
+  say 'STATUS: OK'
+  say 'USER:' u
+  return
+
+Action_NewToken: procedure
+  parse arg authdir, method_
+  u = Authenticate(authdir, method_)
+  if u = '' then return
+  label = HdrOrQuery('HTTP_X_RXPIP_LABEL', value('QUERY_STRING',,'ENVIRONMENT'), 'LABEL')
+  if label = '' then label = 'token'
+  if \IsSafeMeta(label, 40) then do
+    call Fail 400, 'BAD_LABEL', 'label: max 40 plain-text characters'
+    return
+  end
+  if words(UserTokenIds(authdir, u)) >= 20 then do
+    call Fail 409, 'TOO_MANY_TOKENS', 'at most 20 tokens per user; revoke one first'
+    return
+  end
+  tok = CreateToken(authdir, u, label)
+  if tok = '' then do
+    call Fail 500, 'SERVER_NO_RANDOM', 'server could not create a token'
+    return
+  end
+  call SecretHeader
+  say 'STATUS: OK'
+  say 'USER:' u
+  say 'TOKEN:' tok
+  say 'MESSAGE: new token created. Store it now; it is shown only once.'
+  return
+
+Action_Tokens: procedure
+  parse arg authdir, method_
+  u = Authenticate(authdir, method_)
+  if u = '' then return
+  ids = UserTokenIds(authdir, u)
+  call TextHeader
+  say 'STATUS: OK'
+  say 'COUNT:' words(ids)
+  say ''
+  do i = 1 to words(ids)
+    id = word(ids, i)
+    f = authdir || '/tokens/' || id || '.tok'
+    say 'TOKEN_ID:' id
+    say 'LABEL:' FileField(f, 'LABEL')
+    say 'CREATED:' FileField(f, 'CREATED')
+    say ''
+  end
+  return
+
+/* revoke one of your own tokens by id (X-Rxpip-Token-Id) */
+Action_Revoke: procedure
+  parse arg authdir, method_
+  u = Authenticate(authdir, method_)
+  if u = '' then return
+  id = HdrOrQuery('HTTP_X_RXPIP_TOKEN_ID', value('QUERY_STRING',,'ENVIRONMENT'), 'ID')
+  if \IsHex(id, 8) then do
+    call Fail 400, 'BAD_TOKEN_ID', 'token id is 8 hex characters (see action TOKENS)'
+    return
+  end
+  f = authdir || '/tokens/' || id || '.tok'
+  if FileField(f, 'USER') \= u then do
+    call Fail 404, 'NOT_FOUND', 'no such token among yours'
+    return
+  end
+  call DelFile f
+  call TextHeader
+  say 'STATUS: OK'
+  say 'MESSAGE: token' id 'revoked'
+  return
+
+Action_Owners: procedure
+  parse arg authdir, qstring
+  name = QGet(qstring, 'NAME')
+  if \IsSafeToken(name) then do
+    call Fail 400, 'BAD_NAME', 'invalid package name'
+    return
+  end
+  o = OwnersStr(authdir, name)
+  if o = '' then do
+    call Fail 404, 'NOT_FOUND', "no owners recorded for '" || name || "'"
+    return
+  end
+  call TextHeader
+  say 'STATUS: OK'
+  say 'NAME:' name
+  say 'OWNERS:' o
+  return
+
+/* mode ADD or REMOVE; any current owner may change the list */
+Action_ChangeOwner: procedure
+  parse arg authdir, method_, mode
+  u = Authenticate(authdir, method_)
+  if u = '' then return
+  qs = value('QUERY_STRING',,'ENVIRONMENT')
+  name = HdrOrQuery('HTTP_X_RXPIP_NAME', qs, 'NAME')
+  target = HdrOrQuery('HTTP_X_RXPIP_USER', qs, 'USER')
+  if \IsSafeToken(name) then do
+    call Fail 400, 'BAD_NAME', 'invalid package name'
+    return
+  end
+  if \IsSafeUser(target) then do
+    call Fail 400, 'BAD_USER', 'invalid username'
+    return
+  end
+  owners = OwnersStr(authdir, name)
+  if owners = '' then do
+    call Fail 404, 'NOT_FOUND', "package '" || name || "' has no owners (not published yet)"
+    return
+  end
+  if wordpos(u, owners) = 0 then do
+    call Fail 403, 'FORBIDDEN', "you are not an owner of '" || name || "'"
+    return
+  end
+  if mode = 'ADD' then do
+    if \UserExists(authdir, target) then do
+      call Fail 404, 'NO_SUCH_USER', "no such user '" || target || "'"
+      return
+    end
+    if wordpos(target, owners) = 0 then call WriteOwners authdir, name, owners target
+  end
+  else do
+    p = wordpos(target, owners)
+    if p = 0 then do
+      call Fail 404, 'NOT_AN_OWNER', "'" || target || "' is not an owner of '" || name || "'"
+      return
+    end
+    if words(owners) = 1 then do
+      call Fail 409, 'LAST_OWNER', 'cannot remove the last owner'
+      return
+    end
+    call WriteOwners authdir, name, delword(owners, p, 1)
+  end
+  call TextHeader
+  say 'STATUS: OK'
+  say 'NAME:' name
+  say 'OWNERS:' OwnersStr(authdir, name)
+  return
+
+/* =======================================================================
+   ADMIN MODE (command line only)
+   -----------------------------------------------------------------------
+   Run on the server by the operator, as the web user so file ownership is
+   right:   sudo -u apache env RXPIP_REPO_ROOT=... regina -a rxpip_server.rexx admin <cmd>
+   It is entered only when GATEWAY_INTERFACE is unset, i.e. never via
+   Apache/CGI, so there is no HTTP-reachable admin surface.
+   ======================================================================= */
+AdminMain: procedure
+  parse arg authdir, a
+  parse var a sub p1 p2 rest
+  sub = translate(sub)
+  if sub = 'ADMIN' then parse var a . sub p1 p2 rest
+  sub = translate(sub)
+  rest = strip(p2 rest)
+  if Sha256Hex('rxpip') = '' then do
+    say 'rxpip-admin: no SHA-256 tool (sha256sum / shasum / PowerShell)'
+    return 1
+  end
+  select
+    when sub = 'INVITE' then do
+      inv = CreateInvite(authdir, strip(p1 rest))
+      if inv = '' then do; say 'rxpip-admin: could not create invite'; return 1; end
+      say 'invite code (single use, shown once):' inv
+      say 'redeem with: rxpip register --user=<name> --invite=' || inv
+    end
+    when sub = 'ADDUSER' then do
+      if \IsSafeUser(p1) then do; say 'rxpip-admin: usage: adduser <name>  (3-32 chars a-z 0-9 _ -)'; return 1; end
+      call EnsureDir authdir || '/users'
+      if \WriteNew(authdir || '/users/' || p1 || '.user', 'CREATED: ' || date('S') || ' ' || time() || '0a'x) then do
+        say "rxpip-admin: user '" || p1 || "' already exists"; return 1
+      end
+      tok = CreateToken(authdir, p1, 'admin-created')
+      if tok = '' then do; say 'rxpip-admin: could not create token'; return 1; end
+      say 'user' p1 'created. token (shown once):' tok
+    end
+    when sub = 'NEWTOKEN' then do
+      if \UserExists(authdir, p1) then do; say 'rxpip-admin: no such user'; return 1; end
+      lbl = rest; if lbl = '' then lbl = 'admin-created'
+      tok = CreateToken(authdir, p1, lbl)
+      if tok = '' then do; say 'rxpip-admin: could not create token'; return 1; end
+      say 'token for' p1 '(shown once):' tok
+    end
+    when sub = 'USERS' then do
+      u = DirBasesStr(authdir || '/users', '.user')
+      say words(u) 'user(s):' u
+    end
+    when sub = 'TOKENS' then do
+      ids = UserTokenIds(authdir, p1)
+      do i = 1 to words(ids)
+        f = authdir || '/tokens/' || word(ids, i) || '.tok'
+        say word(ids, i) FileField(f, 'CREATED') FileField(f, 'LABEL')
+      end
+      if ids = '' then say '(none)'
+    end
+    when sub = 'REVOKE' then do      /* revoke <token-id> */
+      if \IsHex(p1, 8) then do; say 'rxpip-admin: usage: revoke <8-hex token id>'; return 1; end
+      call DelFile authdir || '/tokens/' || p1 || '.tok'
+      say 'revoked' p1
+    end
+    when sub = 'LOCK' then do        /* revoke every token of a user */
+      ids = UserTokenIds(authdir, p1)
+      do i = 1 to words(ids)
+        call DelFile authdir || '/tokens/' || word(ids, i) || '.tok'
+      end
+      say 'revoked' words(ids) 'token(s) of' p1
+    end
+    when sub = 'OWNERS' then say p1 || ':' OwnersStr(authdir, p1)
+    when sub = 'SETOWNERS' then do   /* setowners <pkg> <user>...  (recovery) */
+      list = rest
+      if \IsSafeToken(p1) | list = '' then do; say 'rxpip-admin: usage: setowners <pkg> <user> [<user>...]'; return 1; end
+      do i = 1 to words(list)
+        if \UserExists(authdir, word(list, i)) then do; say 'rxpip-admin: no such user' word(list, i); return 1; end
+      end
+      call WriteOwners authdir, p1, list
+      say p1 || ':' OwnersStr(authdir, p1)
+    end
+    otherwise do
+      say 'rxpip-admin commands:'
+      say '  invite [note]            create a single-use sign-up code'
+      say '  adduser <name>           create a user and print its first token'
+      say '  newtoken <user> [label]  mint another token for a user'
+      say '  users                    list users'
+      say '  tokens <user>            list a user''s token ids'
+      say '  revoke <token-id>        revoke one token'
+      say '  lock <user>              revoke all of a user''s tokens'
+      say '  owners <pkg>             show owners'
+      say '  setowners <pkg> <u>...   replace the owner list (account recovery)'
+    end
+  end
+  return 0
+
+CliArgs: procedure
+  a = ''
+  do i = 1 to arg()
+    a = a arg(i)
+  end
+  return strip(a)
 
 TextHeader: procedure
   say 'Content-Type: text/plain; charset=utf-8'

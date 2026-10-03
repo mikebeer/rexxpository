@@ -92,6 +92,12 @@ select
   when cmd = 'BUILD'     then call CmdBuild rest
   when cmd = 'PUBLISH'   then call CmdPublish rest
   when cmd = 'CONFIG'    then call CmdConfig rest
+  when cmd = 'REGISTER'  then call CmdRegister rest
+  when cmd = 'LOGIN'     then call CmdLogin rest
+  when cmd = 'LOGOUT'    then call CmdLogout
+  when cmd = 'WHOAMI'    then call CmdWhoami
+  when cmd = 'TOKEN'     then call CmdToken rest
+  when cmd = 'OWNER'     then call CmdOwner rest
   when cmd = 'HELP'      then call CmdHelp
   when cmd = ''          then call CmdHelp
   otherwise do
@@ -118,7 +124,12 @@ CmdHelp:
   say '  scan <file.rexx>            install packages named in /* REQUIRE */'
   say '  run <file.rexx> [args]      scan + auto-install, merge, then execute'
   say '  build <file.rexx> [--output=out]  scan + auto-install, write merged standalone .rexx'
-  say '  publish <pkgfile> ...       upload a package to the repository'
+  say '  publish <pkgfile> --name=N --version=V [...]   upload a package (needs login)'
+  say '  register --user=U --invite=CODE   create an account (invite-only); saves your token'
+  say '  login [--token=T]           save a token (or read it from env RXPIP_TOKEN)'
+  say '  logout | whoami             forget / show the saved login'
+  say '  token new [--label=L] | list | revoke <id>   manage your API tokens'
+  say '  owner list|add|remove <pkg> [user]   manage who may publish a package'
   say '  config get|set <key> [val]  view/change REPO_URL, LIB_DIR, INTERPRETER'
   say '  help                        this message'
   return
@@ -450,7 +461,7 @@ CmdPublish: procedure expose home
   parse arg args
   parse var args pkgfile '01'x .
   if pkgfile = '' | \FileExists(pkgfile) then do
-    say 'usage: rxpip publish <file.rxpkg> --name=X --version=Y --token=T' ,
+    say 'usage: rxpip publish <file.rxpkg> --name=X --version=Y [--token=T]' ,
         '[--author=A --summary=S --requires=R --kind=SOURCE|BYTECODE --platform=TAG]'
     exit 1
     return
@@ -464,22 +475,224 @@ CmdPublish: procedure expose home
   if kind = '' then kind = 'SOURCE'
   platform = OptValue(args, 'platform')
   if platform = '' then platform = 'any'
-  token = OptValue(args, 'token')
-  if token = '' then token = value('RXPIP_TOKEN',,'ENVIRONMENT')
+  cfg.REPO_URL = GetConfigValue(home, 'REPO_URL')
+  token = ResolveToken(home, cfg.REPO_URL, args)
   if name = '' | ver = '' | token = '' then do
-    say 'rxpip: --name, --version and a token (--token=T or env RXPIP_TOKEN) are required'
+    say 'rxpip: --name, --version and a login are required (rxpip login, or --token=T, or env RXPIP_TOKEN)'
     exit 1
     return
   end
-  if length(token) < 16 | length(token) > 128 | ,
-     verify(token, 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~-') > 0 then do
+  if \TokenLooksValid(token) then do
     say 'rxpip: token must be 16-128 characters from A-Z a-z 0-9 . _ ~ -'
     exit 1
     return
   end
-
-  cfg.REPO_URL = GetConfigValue(home, 'REPO_URL')
   rc = ServerPublish(cfg.REPO_URL, pkgfile, name, ver, author, summary, requires, kind, platform, token)
+  exit rc
+  return
+
+/* ---- accounts, tokens, owners ---- */
+
+/* token to use: --token=, then env RXPIP_TOKEN, then the saved login */
+ResolveToken: procedure
+  parse arg home, repo, args
+  t = OptValue(args, 'token')
+  if t = '' then t = value('RXPIP_TOKEN',,'ENVIRONMENT')
+  if t = '' then do
+    parse value GetCredential(home, repo) with u '01'x t
+  end
+  return t
+
+TokenLooksValid: procedure
+  parse arg t
+  if length(t) < 16 | length(t) > 128 then return 0
+  return verify(t, 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~-') = 0
+
+/* credentials.txt: one line per repository:  <repo_url> <user> <token>
+   (kept private to the user on Unix: mode 600) */
+GetCredential: procedure
+  parse arg home, repo
+  f = home || '/credentials.txt'
+  res = ''
+  if FileExists(f) then do
+    do while lines(f) > 0
+      l = linein(f)
+      parse var l r u t .
+      if r = repo then res = u || '01'x || t
+    end
+    call stream f, 'c', 'close'
+  end
+  return res
+
+SaveCredential: procedure
+  parse arg home, repo, user, token
+  f = home || '/credentials.txt'
+  keep = ''
+  if FileExists(f) then do
+    do while lines(f) > 0
+      l = linein(f)
+      parse var l r .
+      if r \= repo & strip(l) \= '' then keep = keep || l || '0a'x
+    end
+    call stream f, 'c', 'close'
+  end
+  content = keep || repo user token || '0a'x
+  if IsWindows() then do
+    call DelFile f
+    call charout f, content
+    call stream f, 'c', 'close'
+  end
+  else do
+    call value 'RXPIP_CRED_CONTENT', content, 'ENVIRONMENT'
+    '(umask 077; printf %s "$RXPIP_CRED_CONTENT" > "' || f || '.new" && mv "' || f || '.new" "' || f || '")'
+    call value 'RXPIP_CRED_CONTENT', '', 'ENVIRONMENT'
+  end
+  return
+
+CmdRegister: procedure expose home
+  parse arg args
+  user = OptValue(args, 'user')
+  inv = OptValue(args, 'invite')
+  if inv = '' then inv = value('RXPIP_INVITE',,'ENVIRONMENT')
+  if user = '' | inv = '' then do
+    say 'usage: rxpip register --user=<name> --invite=<code>   (invite from the repository admin)'
+    exit 1
+    return
+  end
+  repo = GetConfigValue(home, 'REPO_URL')
+  out = ServerPost(repo, 'REGISTER', '', 'X-Rxpip-User: ' || user, 'X-Rxpip-Invite: ' || inv, '')
+  if word(out,1) \= 'STATUS:' | word(out,2) \= 'OK' then do
+    call ShowResponse out
+    exit 1
+    return
+  end
+  tok = StanzaFieldPlain(out, 'TOKEN')
+  call SaveCredential home, repo, user, tok
+  say 'registered as' user || '; your token was saved in' home || '/credentials.txt'
+  say 'Treat that file like a password. You can now: rxpip publish ...'
+  exit 0
+  return
+
+CmdLogin: procedure expose home
+  parse arg args
+  repo = GetConfigValue(home, 'REPO_URL')
+  t = OptValue(args, 'token')
+  if t = '' then t = value('RXPIP_TOKEN',,'ENVIRONMENT')
+  if t = '' | \TokenLooksValid(t) then do
+    say 'usage: rxpip login --token=<token>   (or set env RXPIP_TOKEN)'
+    exit 1
+    return
+  end
+  out = ServerPost(repo, 'WHOAMI', '', '', 'X-Rxpip-Token: ' || t, '')
+  if word(out,1) \= 'STATUS:' | word(out,2) \= 'OK' then do
+    call ShowResponse out
+    exit 1
+    return
+  end
+  u = StanzaFieldPlain(out, 'USER')
+  call SaveCredential home, repo, u, t
+  say 'logged in as' u
+  exit 0
+  return
+
+CmdLogout: procedure expose home
+  repo = GetConfigValue(home, 'REPO_URL')
+  f = home || '/credentials.txt'
+  keep = ''
+  if FileExists(f) then do
+    do while lines(f) > 0
+      l = linein(f)
+      parse var l r .
+      if r \= repo & strip(l) \= '' then keep = keep || l || '0a'x
+    end
+    call stream f, 'c', 'close'
+    call DelFile f
+    if keep \= '' then do
+      call charout f, keep
+      call stream f, 'c', 'close'
+    end
+  end
+  say 'logged out of' repo
+  exit 0
+  return
+
+CmdWhoami: procedure expose home
+  repo = GetConfigValue(home, 'REPO_URL')
+  t = ResolveToken(home, repo, '')
+  if t = '' then do
+    say 'not logged in'
+    exit 1
+    return
+  end
+  out = ServerPost(repo, 'WHOAMI', '', '', 'X-Rxpip-Token: ' || t, '')
+  rc = ShowResponse(out)
+  exit rc
+  return
+
+CmdToken: procedure expose home
+  parse arg sub '01'x rest
+  sub = translate(sub)
+  repo = GetConfigValue(home, 'REPO_URL')
+  t = ResolveToken(home, repo, '')
+  if t = '' then do
+    say 'not logged in (rxpip login --token=T)'
+    exit 1
+    return
+  end
+  hdrs = ''
+  select
+    when sub = 'NEW' then do
+      lbl = OptValue(rest, 'label')
+      if lbl \= '' then hdrs = 'X-Rxpip-Label: ' || lbl
+      out = ServerPost(repo, 'NEWTOKEN', '', hdrs, 'X-Rxpip-Token: ' || t, '')
+    end
+    when sub = 'LIST' then out = ServerPost(repo, 'TOKENS', '', '', 'X-Rxpip-Token: ' || t, '')
+    when sub = 'REVOKE' then do
+      parse var rest id '01'x .
+      if id = '' then do
+        say 'usage: rxpip token revoke <token-id>   (see: rxpip token list)'
+        exit 1
+        return
+      end
+      out = ServerPost(repo, 'REVOKE', '', 'X-Rxpip-Token-Id: ' || id, 'X-Rxpip-Token: ' || t, '')
+    end
+    otherwise do
+      say 'usage: rxpip token new [--label=L] | list | revoke <id>'
+      exit 1
+      return
+    end
+  end
+  rc = ShowResponse(out)
+  exit rc
+  return
+
+CmdOwner: procedure expose home
+  parse arg sub '01'x pkg '01'x who '01'x .
+  sub = translate(sub)
+  repo = GetConfigValue(home, 'REPO_URL')
+  if pkg = '' | (sub \= 'LIST' & who = '') then do
+    say 'usage: rxpip owner list <pkg> | add <pkg> <user> | remove <pkg> <user>'
+    exit 1
+    return
+  end
+  if sub = 'LIST' then do
+    rc = ShowResponse(ServerGet(repo, 'OWNERS', 'name=' || UrlEncode(pkg)))
+    exit rc
+    return
+  end
+  if sub \= 'ADD' & sub \= 'REMOVE' then do
+    say 'usage: rxpip owner list <pkg> | add <pkg> <user> | remove <pkg> <user>'
+    exit 1
+    return
+  end
+  t = ResolveToken(home, repo, '')
+  if t = '' then do
+    say 'not logged in (rxpip login --token=T)'
+    exit 1
+    return
+  end
+  out = ServerPost(repo, sub || 'OWNER', '', 'X-Rxpip-Name: ' || pkg || '01'x || 'X-Rxpip-User: ' || who, 'X-Rxpip-Token: ' || t, '')
+  rc = ShowResponse(out)
   exit rc
   return
 
@@ -668,47 +881,36 @@ ServerDownload: procedure
   if sz = 0 then return 1
   return 0
 
-/* publish a package via POST with raw binary body. Metadata is sent
-   BOTH as X-Rxpip-* headers (the normal path under Apache/mod_cgi,
-   which forwards all request headers per the CGI spec) AND as query
-   string parameters (a fallback for proxies/minimal CGI handlers that
-   only forward a fixed header whitelist) -- the server prefers the
-   header value when both are present. */
-ServerPublish: procedure
-  parse arg repo, pkgfile, name, ver, author, summary, requires, kind, platform, token
-  url = repo || '?action=PUBLISH' ||,
-        '&name=' || UrlEncode(name) ||,
-        '&version=' || UrlEncode(ver) ||,
-        '&author=' || UrlEncode(author) ||,
-        '&summary=' || UrlEncode(summary) ||,
-        '&requires=' || UrlEncode(requires) ||,
-        '&kind=' || UrlEncode(kind) ||,
-        '&platform=' || UrlEncode(platform)
-  /* The secret token is NEVER put in the URL (URLs end up in access logs)
-     nor on curl's command line (visible in `ps`): it goes to curl through
-     a private header file (curl -H @file). */
-  hdrfile = TempDir() || '/rxpip_hdr_' || time('L') || '_' || random(1,99999) || '.tmp'
+/* POST to the server. hdrs = '01'x-separated "Name: value" lines that are
+   not secret; secrets = '01'x-separated header lines that ARE secret (the
+   token, an invite code). Secrets never go in the URL (URLs are logged)
+   nor on curl's command line (visible in `ps`): they travel through a
+   private temporary header file (curl -H @file). bodyfile may be ''.
+   Returns the response text ('' if the server could not be reached). */
+ServerPost: procedure
+  parse arg repo, action, extra, hdrs, secrets, bodyfile
+  url = repo || '?action=' || action
+  if extra \= '' then url = url || '&' || extra
+  uniq = time('L') || '_' || random(1,99999)
+  hdrfile = TempDir() || '/rxpip_hdr_' || uniq || '.tmp'
+  tmp = TempDir() || '/rxpip_post_' || uniq || '.tmp'
   if IsWindows() then do
-    call charout hdrfile, 'X-Rxpip-Token: ' || token || '0d0a'x
+    call charout hdrfile, translate(secrets, '0a'x, '01'x) || '0d0a'x
     call stream hdrfile, 'c', 'close'
   end
   else do
-    call value 'RXPIP_TOKEN_TMP', token, 'ENVIRONMENT'
-    '(umask 077; printf "X-Rxpip-Token: %s\n" "$RXPIP_TOKEN_TMP" > "' || hdrfile || '")'
-    call value 'RXPIP_TOKEN_TMP', '', 'ENVIRONMENT'
+    call value 'RXPIP_SECRET_HDRS', translate(secrets, '0a'x, '01'x), 'ENVIRONMENT'
+    '(umask 077; printf "%s\n" "$RXPIP_SECRET_HDRS" > "' || hdrfile || '")'
+    call value 'RXPIP_SECRET_HDRS', '', 'ENVIRONMENT'
   end
-  tmp = TempDir() || '/rxpip_pub_' || time('L') || '_' || random(1,99999) || '.tmp'
-  cmd = 'curl -s -o "' || tmp || '" -X POST' ||,
-        ' -H "X-Rxpip-Name: ' || name || '"' ||,
-        ' -H "X-Rxpip-Version: ' || ver || '"' ||,
-        ' -H "X-Rxpip-Author: ' || author || '"' ||,
-        ' -H "X-Rxpip-Summary: ' || summary || '"' ||,
-        ' -H "X-Rxpip-Requires: ' || requires || '"' ||,
-        ' -H "X-Rxpip-Kind: ' || kind || '"' ||,
-        ' -H "X-Rxpip-Platform: ' || platform || '"' ||,
-        ' -H @"' || hdrfile || '"' ||,
-        ' --data-binary @"' || pkgfile || '"' ||,
-        ' "' || url || '"'
+  cmd = 'curl -s -o "' || tmp || '" -X POST -H @"' || hdrfile || '"'
+  do while hdrs \= ''
+    parse var hdrs h '01'x hdrs
+    if h \= '' then cmd = cmd || ' -H "' || h || '"'
+  end
+  if bodyfile \= '' then cmd = cmd || ' --data-binary @"' || bodyfile || '"'
+  else cmd = cmd || ' -d ""'
+  cmd = cmd || ' "' || url || '"'
   cmd
   call DelFile hdrfile
   out = ''
@@ -719,8 +921,30 @@ ServerPublish: procedure
     call stream tmp, 'c', 'close'
   end
   call DelFile tmp
+  return out
+
+/* publish a package: raw artifact bytes as the POST body, metadata as
+   X-Rxpip-* headers (non-secret) and the token as a secret header */
+ServerPublish: procedure
+  parse arg repo, pkgfile, name, ver, author, summary, requires, kind, platform, token
+  hdrs = 'X-Rxpip-Name: ' || name || '01'x ||,
+         'X-Rxpip-Version: ' || ver || '01'x ||,
+         'X-Rxpip-Author: ' || author || '01'x ||,
+         'X-Rxpip-Summary: ' || summary || '01'x ||,
+         'X-Rxpip-Requires: ' || requires || '01'x ||,
+         'X-Rxpip-Kind: ' || kind || '01'x ||,
+         'X-Rxpip-Platform: ' || platform
+  out = ServerPost(repo, 'PUBLISH', '', hdrs, 'X-Rxpip-Token: ' || token, pkgfile)
+  return ShowResponse(out)
+
+/* print a server response; 0 if it says STATUS: OK, else 1 */
+ShowResponse: procedure
+  parse arg out
   say out
-  if out = '' then say 'rxpip: no response from server'
+  if out = '' then do
+    say 'rxpip: no response from server'
+    return 1
+  end
   if word(out,1) = 'STATUS:' & word(out,2) = 'OK' then return 0
   return 1
 

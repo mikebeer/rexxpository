@@ -42,8 +42,10 @@ tar czf "$WORK/mathutils.rxpkg" -C "$FX" mathutils.rexx
 tar czf "$WORK/strutils.rxpkg" -C "$FX" strutils.rexx
 tar czf "$WORK/greetutils.rxpkg" -C "$FX" greetutils.rexx
 tar czf "$WORK/dotslash.rxpkg" -C "$FX" ./mathutils.rexx
-TOKA=tokenAAAA_0123456789abcdef
-TOKB=tokenBBBB_0123456789abcdef
+# users are created with the server's own admin mode (the only way in)
+adm() { RXPIP_REPO_ROOT=$REPO regina -a "$ROOT/server/rxpip_server.rexx" admin "$@"; }
+TOKA=$(adm adduser alice | sed 's/.*: //')
+TOKB=$(adm adduser bob | sed 's/.*: //')
 
 # pub <name> <ver> <token> <file> [extra curl args...]  -> sets BODY and CODE
 pub() {
@@ -68,9 +70,10 @@ pub mathutils 1.0.0 "$TOKA" "$WORK/mathutils.rxpkg"
 expect "publish with header token succeeds" "$BODY" "MESSAGE: published"
 [ "$CODE" = 200 ] && ok "publish returns HTTP 200" || bad "publish returns HTTP 200" "got $CODE"
 
-OWNER=$(cat "$REPO/.auth/mathutils.owner" 2>/dev/null)
-expect "owner record is a salted sha256 record" "$OWNER" 'sha256$'
+OWNER=$(cat "$REPO"/.auth/tokens/*.tok 2>/dev/null)
+expect "token records are salted sha256 records" "$OWNER" 'sha256$'
 expect_not "plaintext token is not stored" "$OWNER" "$TOKA"
+expect "owner list names the publishing user" "$(cat "$REPO/.auth/owners/mathutils.owners")" "alice"
 expect_not "plaintext token is not anywhere in the repo" "$(grep -r "$TOKA" "$REPO" 2>/dev/null)" "$TOKA"
 
 out=$(curl -s -w '\n%{http_code}' -X POST -H "X-Rxpip-Name: mathutils" -H "X-Rxpip-Version: 1.0.1" \
@@ -121,7 +124,7 @@ head -c 6000000 /dev/urandom > "$WORK/huge.bin"
 pub bigpkg 1.0.0 "$TOKA" "$WORK/huge.bin"
 expect "6 MB upload exceeds the default cap" "$BODY" "TOO_LARGE"
 [ "$CODE" = 413 ] && ok "oversize gives HTTP 413" || bad "oversize gives HTTP 413" "got $CODE"
-[ -e "$REPO/.auth/bigpkg.owner" ] && bad "oversize upload does not claim the name" || ok "oversize upload does not claim the name"
+[ -e "$REPO/.auth/owners/bigpkg.owners" ] && bad "oversize upload does not claim the name" || ok "oversize upload does not claim the name"
 
 # ============================================================================
 section "step 1: input validation"
@@ -172,7 +175,7 @@ for t in evil_symlink evil_dotdot evil_abs evil_nested evil_dir evil_name evil_h
   pub archtest 1.0.0 "$TOKA" "$WORK/$t.rxpkg"
   expect "archive '$t' is rejected" "$BODY" "BAD_ARCHIVE"
 done
-[ -e "$REPO/.auth/archtest.owner" ] && bad "rejected archives do not claim the name" || ok "rejected archives do not claim the name"
+[ -e "$REPO/.auth/owners/archtest.owners" ] && bad "rejected archives do not claim the name" || ok "rejected archives do not claim the name"
 [ -e "$REPO/archtest" ] && bad "rejected archives leave no package directory behind" "$(find "$REPO/archtest")" || ok "rejected archives leave no package directory behind"
 [ -z "$(find "$REPO/.staging" -type f 2>/dev/null)" ] && ok "staging area is empty after rejections" || bad "staging area is empty after rejections" "$(find "$REPO/.staging" -type f)"
 expect "ghost packages do not appear in LIST" "$(get action=LIST)" "COUNT: 2"
@@ -192,18 +195,126 @@ else
 fi
 
 # ============================================================================
+section "step 2: invites and registration"
+# api <action> <token> [extra curl args]  -> BODY, CODE   (POST, token in header)
+api() {
+  local act=$1 tok=$2; shift 2
+  local out
+  out=$(curl -s -w '\n%{http_code}' -X POST ${tok:+-H "X-Rxpip-Token: $tok"} "$@" "$BASE?action=$act")
+  CODE=${out##*$'\n'}; BODY=${out%$'\n'*}
+}
+INV1=$(adm invite first | sed 's/.*: //; s/ .*//' | head -1)
+expect "invite code has the inv_ shape" "$INV1" "inv_"
+api REGISTER "" -H "X-Rxpip-Invite: $INV1" -H "X-Rxpip-User: carol"
+expect "registration with a valid invite succeeds" "$BODY" "STATUS: OK"
+TOKC=$(printf '%s\n' "$BODY" | sed -n 's/^TOKEN: //p')
+expect "registration returns a token" "$TOKC" "rxp_"
+expect "register response is not cacheable" "$(curl -si -X POST -H "X-Rxpip-Invite: nope" -H "X-Rxpip-User: dave" "$BASE?action=REGISTER" | head -1)" "403"
+api REGISTER "" -H "X-Rxpip-Invite: $INV1" -H "X-Rxpip-User: dave"
+expect "an invite cannot be used twice" "$BODY" "BAD_INVITE"
+[ "$CODE" = 403 ] && ok "used invite gives HTTP 403" || bad "used invite gives HTTP 403" "got $CODE"
+INV2=$(adm invite second | sed 's/.*: //; s/ .*//' | head -1)
+api REGISTER "" -H "X-Rxpip-Invite: $INV2" -H "X-Rxpip-User: carol"
+expect "duplicate username is refused" "$BODY" "USER_EXISTS"
+api REGISTER "" -H "X-Rxpip-Invite: $INV2" -H "X-Rxpip-User: Bad Name"
+expect "invalid username is refused" "$BODY" "BAD_USER"
+api REGISTER "" -H "X-Rxpip-Invite: $INV2" -H "X-Rxpip-User: Carol"
+expect "uppercase username is refused (case-insensitive FS safety)" "$BODY" "BAD_USER"
+api REGISTER "" -H "X-Rxpip-Invite: inv_00000000_00000000000000000000000000000000" -H "X-Rxpip-User: erin"
+expect "forged invite is refused" "$BODY" "BAD_INVITE"
+api REGISTER "" -H "X-Rxpip-Invite: $INV2" -H "X-Rxpip-User: dave"
+expect "the unused invite still works after failed attempts" "$BODY" "STATUS: OK"
+expect_not "invite secret is not stored in clear" "$(grep -r "${INV1##*_}" "$REPO/.auth" 2>/dev/null)" "${INV1##*_}"
+expect_not "token secret is not stored in clear" "$(grep -r "${TOKC##*_}" "$REPO/.auth" 2>/dev/null)" "${TOKC##*_}"
+r1=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "X-Rxpip-Invite: $INV2" -H "X-Rxpip-User: frank" "$BASE?action=REGISTER")
+INV3=$(adm invite race | sed 's/.*: //; s/ .*//' | head -1)
+( api REGISTER "" -H "X-Rxpip-Invite: $INV3" -H "X-Rxpip-User: racer1"; echo "$CODE" > "$WORK/ri1" ) &
+RI1=$!
+( api REGISTER "" -H "X-Rxpip-Invite: $INV3" -H "X-Rxpip-User: racer2"; echo "$CODE" > "$WORK/ri2" ) &
+RI2=$!
+wait $RI1 $RI2
+a=$(cat "$WORK/ri1"); b=$(cat "$WORK/ri2")
+if { [ "$a" = 200 ] && [ "$b" != 200 ]; } || { [ "$b" = 200 ] && [ "$a" != 200 ]; }; then ok "one invite, two racers: exactly one wins ($a/$b)"; else bad "one invite, two racers: exactly one wins" "$a/$b"; fi
+
+# ============================================================================
+section "step 2: tokens"
+api WHOAMI "$TOKC"
+expect "WHOAMI names the user" "$BODY" "USER: carol"
+api WHOAMI "rxp_00000000_000000000000000000000000000000000000000000000000"
+expect "unknown token is refused" "$BODY" "BAD_TOKEN"
+[ "$CODE" = 401 ] && ok "unknown token gives HTTP 401" || bad "unknown token gives HTTP 401" "got $CODE"
+LASTC=${TOKC: -1}; FLIP=0; [ "$LASTC" = 0 ] && FLIP=1
+api WHOAMI "${TOKC%?}$FLIP"
+expect "token with one wrong character is refused" "$BODY" "BAD_TOKEN"
+api WHOAMI "$TOKC" "$BASE?action=WHOAMI&token=$TOKC"
+expect "token in URL is refused here too" "$(curl -s -X POST -H "X-Rxpip-Token: $TOKC" "$BASE?action=WHOAMI&token=$TOKC")" "TOKEN_IN_URL"
+expect "GET is refused for authenticated actions" "$(get action=WHOAMI)" "METHOD_NOT_ALLOWED"
+api NEWTOKEN "$TOKC" -H "X-Rxpip-Label: laptop"
+TOKC2=$(printf '%s\n' "$BODY" | sed -n 's/^TOKEN: //p')
+expect "NEWTOKEN returns a new token" "$TOKC2" "rxp_"
+api TOKENS "$TOKC"
+expect "TOKENS lists both tokens" "$BODY" "COUNT: 2"
+expect "TOKENS shows the label" "$BODY" "LABEL: laptop"
+expect_not "TOKENS never shows secrets" "$BODY" "${TOKC2##*_}"
+ID2=$(printf '%s' "$TOKC2" | cut -d_ -f2)
+api REVOKE "$TOKC" -H "X-Rxpip-Token-Id: $ID2"
+expect "REVOKE removes a token" "$BODY" "revoked"
+api WHOAMI "$TOKC2"
+expect "a revoked token stops working" "$BODY" "BAD_TOKEN"
+api WHOAMI "$TOKC"
+expect "the other token still works" "$BODY" "USER: carol"
+IDA=$(printf '%s' "$TOKA" | cut -d_ -f2)
+api REVOKE "$TOKC" -H "X-Rxpip-Token-Id: $IDA"
+expect "cannot revoke someone else's token" "$BODY" "NOT_FOUND"
+api WHOAMI "$TOKA"
+expect "alice's token survived that attempt" "$BODY" "USER: alice"
+
+# ============================================================================
+section "step 2: owners"
+expect "OWNERS lists the claimant" "$(get 'action=OWNERS&name=mathutils')" "OWNERS: alice"
+pub mathutils 2.0.0 "$TOKC" "$WORK/mathutils.rxpkg"
+expect "a non-owner cannot publish" "$BODY" "FORBIDDEN"
+[ "$CODE" = 403 ] && ok "non-owner gives HTTP 403" || bad "non-owner gives HTTP 403" "got $CODE"
+api ADDOWNER "$TOKC" -H "X-Rxpip-Name: mathutils" -H "X-Rxpip-User: carol"
+expect "a non-owner cannot add owners" "$BODY" "FORBIDDEN"
+api ADDOWNER "$TOKA" -H "X-Rxpip-Name: mathutils" -H "X-Rxpip-User: nosuchuser"
+expect "adding an unknown user is refused" "$BODY" "NO_SUCH_USER"
+api ADDOWNER "$TOKA" -H "X-Rxpip-Name: mathutils" -H "X-Rxpip-User: carol"
+expect "an owner can add an owner" "$BODY" "OWNERS: alice carol"
+api ADDOWNER "$TOKA" -H "X-Rxpip-Name: mathutils" -H "X-Rxpip-User: carol"
+expect "adding twice is harmless" "$BODY" "OWNERS: alice carol"
+pub mathutils 2.0.0 "$TOKC" "$WORK/mathutils.rxpkg"
+expect "the new owner can publish" "$BODY" "MESSAGE: published"
+pub mathutils 2.0.1 "$TOKB" "$WORK/mathutils.rxpkg"
+expect "bob is still locked out" "$BODY" "FORBIDDEN"
+api REMOVEOWNER "$TOKC" -H "X-Rxpip-Name: mathutils" -H "X-Rxpip-User: alice"
+expect "an owner can remove another owner" "$BODY" "OWNERS: carol"
+api REMOVEOWNER "$TOKC" -H "X-Rxpip-Name: mathutils" -H "X-Rxpip-User: carol"
+expect "the last owner cannot be removed" "$BODY" "LAST_OWNER"
+pub mathutils 2.0.2 "$TOKA" "$WORK/mathutils.rxpkg"
+expect "a removed owner can no longer publish" "$BODY" "FORBIDDEN"
+api ADDOWNER "$TOKA" -H "X-Rxpip-Name: nonexistentpkg" -H "X-Rxpip-User: carol"
+expect "owner changes on an unknown package are refused" "$BODY" "NOT_FOUND"
+api ADDOWNER "$TOKC" -H "X-Rxpip-Name: ../x" -H "X-Rxpip-User: alice"
+expect "unsafe package name is refused" "$BODY" "BAD_NAME"
+expect "admin can restore ownership" "$(adm setowners mathutils alice carol)" "mathutils: alice carol"
+adm lock carol > /dev/null
+api WHOAMI "$TOKC"
+expect "admin lock revokes all of a user's tokens" "$BODY" "BAD_TOKEN"
+
+# ============================================================================
 section "step 1: client publish / install / run (real client over HTTP)"
 CH=$WORK/clienthome
 export RXPIP_HOME=$CH
 mkdir -p "$CH"
 RX="regina -a $ROOT/client/rxpip.rexx"
 $RX config set REPO_URL "$BASE" >/dev/null 2>&1
-CTOK=clienttoken_0123456789abcdef
+CTOK=$TOKA
 out=$($RX publish "$WORK/greetutils.rxpkg" --name=cligreet --version=1.0.0 --token=$CTOK --summary="client test" 2>&1)
 expect "client publish succeeds" "$out" "STATUS: OK"
 out=$($RX publish "$WORK/greetutils.rxpkg" --name=cligreet --version=1.0.1 --token=short 2>&1)
 expect "client rejects short token locally" "$out" "16-128"
-out=$($RX publish "$WORK/greetutils.rxpkg" --name=cligreet --version=1.0.2 --token=wrongtoken_0123456789abc 2>&1)
+out=$($RX publish "$WORK/greetutils.rxpkg" --name=cligreet --version=1.0.2 --token=$TOKB 2>&1)
 expect "client shows server FORBIDDEN for wrong token" "$out" "FORBIDDEN"
 out=$(RXPIP_TOKEN=$CTOK $RX publish "$WORK/greetutils.rxpkg" --name=cligreet --version=1.0.3 2>&1)
 expect "client takes token from RXPIP_TOKEN" "$out" "STATUS: OK"
@@ -211,6 +322,44 @@ grep -rq "$CTOK" "$REPO" && bad "client token never stored in clear on server" |
 out=$($RX install cligreet 2>&1)
 expect "client install works" "$out" "cligreet"
 ls /tmp 2>/dev/null | grep -q rxpip_hdr_ && bad "token header file removed" || ok "token header file removed"
+unset RXPIP_HOME
+
+# ============================================================================
+section "step 2: client accounts, tokens, owners"
+export RXPIP_HOME=$WORK/clienthome2
+mkdir -p "$RXPIP_HOME"
+$RX config set REPO_URL "$BASE" >/dev/null 2>&1
+CINV=$(adm invite client | sed 's/.*: //; s/ .*//' | head -1)
+out=$($RX register --user=gina --invite=$CINV 2>&1)
+expect "client register succeeds" "$out" "registered as gina"
+expect_not "register does not echo the token" "$out" "rxp_"
+perm=$(stat -c %a "$RXPIP_HOME/credentials.txt" 2>/dev/null || stat -f %Lp "$RXPIP_HOME/credentials.txt")
+[ "$perm" = 600 ] && ok "credentials file is mode 600" || bad "credentials file is mode 600" "mode $perm"
+expect "whoami uses the saved login" "$($RX whoami 2>&1)" "USER: gina"
+out=$($RX publish "$WORK/strutils.rxpkg" --name=ginapkg --version=1.0.0 2>&1)
+expect "publish works from the saved login (no --token)" "$out" "MESSAGE: published"
+expect "owner list" "$($RX owner list ginapkg 2>&1)" "OWNERS: gina"
+out=$($RX owner add ginapkg alice 2>&1)
+expect "owner add" "$out" "OWNERS: gina alice"
+out=$($RX owner remove ginapkg alice 2>&1)
+expect "owner remove" "$out" "OWNERS: gina"
+out=$($RX owner remove ginapkg gina 2>&1)
+expect "client shows LAST_OWNER" "$out" "LAST_OWNER"
+out=$($RX token new --label=ci 2>&1)
+expect "token new prints a token once" "$out" "TOKEN: rxp_"
+NEWT=$(printf '%s\n' "$out" | sed -n 's/^TOKEN: //p')
+out=$($RX token list 2>&1)
+expect "token list shows both" "$out" "COUNT: 2"
+NID=$(printf '%s' "$NEWT" | cut -d_ -f2)
+expect "token revoke" "$($RX token revoke $NID 2>&1)" "revoked"
+expect "revoked token no longer logs in" "$(RXPIP_TOKEN=$NEWT $RX login 2>&1)" "BAD_TOKEN"
+expect "login with a good token" "$(RXPIP_TOKEN=$TOKB $RX login 2>&1)" "logged in as bob"
+expect "whoami now says bob" "$($RX whoami 2>&1)" "USER: bob"
+$RX logout >/dev/null 2>&1
+expect "whoami after logout" "$($RX whoami 2>&1)" "not logged in"
+[ -e "$RXPIP_HOME/credentials.txt" ] && bad "logout removes the credentials file" || ok "logout removes the credentials file"
+out=$($RX publish "$WORK/strutils.rxpkg" --name=ginapkg --version=1.0.1 2>&1)
+expect "publish without login is refused locally" "$out" "login"
 unset RXPIP_HOME
 
 # ============================================================================
