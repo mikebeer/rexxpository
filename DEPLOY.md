@@ -1,77 +1,146 @@
-# Deploying the RXPIP server
+# Deploying the RXPIP server (AlmaLinux 9 on Hetzner)
 
-Target: `www.rexxpository.org`, Apache + `mod_cgi` on Linux.
+Target: `www.rexxpository.org`, Apache (`httpd`) + CGI on AlmaLinux 9
+(AlmaLinux 8 works the same way; paths and package names are identical).
 
-## 1. Install Regina
+> **Verification status.** The server code is covered by an end-to-end
+> test suite (`tests/run_tests.sh`, 150+ checks over real HTTP against a
+> CGI harness that behaves like Apache). The commands below for
+> AlmaLinux itself (dnf, SELinux, firewalld, certbot) have **not** been
+> executed on an AlmaLinux host from this project's development
+> environment; they follow the standard procedure for that platform.
+> The SELinux step in particular is where a first deployment most often
+> needs a second look; §12 says how to diagnose it.
 
-```bash
-sudo apt-get install -y regina-rexx curl
-```
-
-`regina` must be on `$PATH` for the user Apache runs CGI scripts as
-(normally `www-data`); the package install above puts it in
-`/usr/bin/regina`, which is fine.
-
-## 2. Lay out the repository
-
-```bash
-sudo mkdir -p /var/www/rexxpository.org/repo
-sudo mkdir -p /var/www/rexxpository.org/cgi-bin
-sudo chown -R www-data:www-data /var/www/rexxpository.org/repo
-```
-
-**The repo directory must be writable by the Apache user** — `PUBLISH`
-creates directories and writes files under it. (During development we
-tested against a minimal Python CGI server; running that as root
-silently broke writes, because Python's CGI handler drops privileges to
-`nobody` before exec'ing the script, and `nobody` couldn't write into a
-root-owned directory. Reads worked, writes didn't, and the symptom was a
-misleading-looking `STATUS: OK` response with nothing actually written.
-Under real Apache this isn't automatic — you must deliberately make the
-repo directory owned by, or writable by, `www-data`.)
-
-## 3. Install the server script
+## 1. Packages
 
 ```bash
-sudo cp server/rxpip_server.rexx /var/www/rexxpository.org/cgi-bin/
-sudo chmod +x /var/www/rexxpository.org/cgi-bin/rxpip_server.rexx
-sudo chown www-data:www-data /var/www/rexxpository.org/cgi-bin/rxpip_server.rexx
+sudo dnf install -y epel-release
+sudo dnf install -y httpd mod_ssl curl tar gzip coreutils regina-rexx
+regina -v          # confirm it runs
 ```
 
-## 4. Apache config
+If `regina-rexx` is not available for your release, build it from the
+Regina source tarball (regina-rexx.sourceforge.net):
+
+```bash
+sudo dnf groupinstall -y "Development Tools"
+tar xzf Regina-REXX-3.9.5.tar.gz && cd Regina-REXX-3.9.5
+./configure && make && sudo make install     # installs /usr/local/bin/regina
+```
+
+If Regina ends up in `/usr/local/bin`, make sure the CGI sees it: either
+symlink it to `/usr/bin/regina` or set `PATH` for Apache (`SetEnv PATH ...`
+is not enough for the shebang; the symlink is simpler).
+
+The server shells out to `tar`, `sha256sum`, `head`, `od`, `ls`, `mv`, `rm`
+and `mkdir` (all in a stock install) and reads `/dev/urandom`. If
+`sha256sum` or secure randomness were unavailable the server refuses to
+create accounts rather than fall back to something weak.
+
+## 2. Directory layout and ownership
+
+Everything the server writes lives **outside** Apache's `DocumentRoot`,
+so account data can never be served as a static file:
+
+```bash
+sudo mkdir -p /var/www/rexxpository/{cgi-bin,repo}
+sudo chown -R apache:apache /var/www/rexxpository/repo
+sudo chmod 750 /var/www/rexxpository/repo
+sudo cp server/rxpip_server.rexx /var/www/rexxpository/cgi-bin/
+sudo chmod 755 /var/www/rexxpository/cgi-bin/rxpip_server.rexx
+```
+
+The repo directory must be writable by the user Apache runs CGI as
+(`apache` on AlmaLinux). Inside it the server creates package
+directories, `.auth/` (users, token hashes, invites, owner lists) and
+`.staging/` (uploads in flight); the dot-directories are never listed as
+packages.
+
+## 3. SELinux (leave it enforcing)
+
+AlmaLinux ships with SELinux enforcing, and Apache is confined: it may
+not execute scripts or write files except where labelled for it.
+
+```bash
+sudo dnf install -y policycoreutils-python-utils
+sudo semanage fcontext -a -t httpd_sys_script_exec_t "/var/www/rexxpository/cgi-bin(/.*)?"
+sudo semanage fcontext -a -t httpd_sys_rw_content_t  "/var/www/rexxpository/repo(/.*)?"
+sudo restorecon -Rv /var/www/rexxpository
+ls -dZ /var/www/rexxpository/cgi-bin /var/www/rexxpository/repo
+```
+
+You should see `httpd_sys_script_exec_t` and `httpd_sys_rw_content_t`.
+Do not "fix" problems with `setenforce 0`; use the audit log (§12).
+
+## 4. Apache virtual host
+
+`/etc/httpd/conf.d/rexxpository.conf`:
 
 ```apache
+<VirtualHost *:80>
+    ServerName www.rexxpository.org
+    # certbot will add the HTTPS vhost and this redirect; shown for clarity
+    RewriteEngine On
+    RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
+</VirtualHost>
+
 <VirtualHost *:443>
     ServerName www.rexxpository.org
-    DocumentRoot /var/www/rexxpository.org/html
+    DocumentRoot /var/www/rexxpository/html
 
-    ScriptAlias /cgi-bin/ /var/www/rexxpository.org/cgi-bin/
-    <Directory "/var/www/rexxpository.org/cgi-bin">
+    ScriptAlias /cgi-bin/ /var/www/rexxpository/cgi-bin/
+    <Directory "/var/www/rexxpository/cgi-bin">
         Options +ExecCGI
         AddHandler cgi-script .rexx
         Require all granted
     </Directory>
 
-    SetEnv RXPIP_REPO_ROOT /var/www/rexxpository.org/repo
+    # the web front page is the CGI's no-action page
+    RedirectMatch 302 "^/$" "/cgi-bin/rxpip_server.rexx"
 
-    # TLS config (certbot/Let's Encrypt or your own certs) goes here --
-    # the client defaults to https:// and PUBLISH sends a shared-secret
-    # token in a header, so this endpoint should not be served over
-    # plain http in production.
+    SetEnv RXPIP_REPO_ROOT /var/www/rexxpository/repo
+    # upload cap in bytes (default 5242880 = 5 MiB). Keep Apache's own limit
+    # a little higher so the server can answer with its own clear error:
+    SetEnv RXPIP_MAX_UPLOAD 5242880
+    LimitRequestBody 5300000
+
+    # TLS: managed by certbot (below). Tokens travel in request headers, so
+    # this service must only be reachable over HTTPS.
 </VirtualHost>
 ```
 
-Enable the needed modules and reload:
-
 ```bash
-sudo a2enmod cgid ssl
-sudo systemctl reload apache2
+sudo mkdir -p /var/www/rexxpository/html     # empty DocumentRoot
+sudo apachectl configtest && sudo systemctl enable --now httpd
 ```
 
-`mod_cgid` (threaded MPM) or `mod_cgi` (prefork MPM) both work; use
-whichever matches your Apache MPM.
+`mod_cgid` is loaded by default on AlmaLinux (`conf.modules.d/01-cgi.conf`).
+`mod_rewrite` is also loaded by default.
 
-## 5. Smoke test
+## 5. Firewall (two layers on Hetzner)
+
+```bash
+sudo firewall-cmd --permanent --add-service=http --add-service=https
+sudo firewall-cmd --reload
+```
+
+Hetzner Cloud also has its own **Cloud Firewall** in the Hetzner console,
+independent of `firewalld`: allow inbound TCP 80 and 443 (and 22 from
+your own address only). If the site works from the server itself but not
+from outside, that is the first place to look.
+
+## 6. HTTPS (Let's Encrypt)
+
+Point the DNS A/AAAA records of `www.rexxpository.org` at the server first.
+
+```bash
+sudo dnf install -y certbot python3-certbot-apache
+sudo certbot --apache -d www.rexxpository.org
+sudo systemctl list-timers | grep certbot      # renewal is automatic
+```
+
+## 7. Smoke test
 
 ```bash
 curl -s "https://www.rexxpository.org/cgi-bin/rxpip_server.rexx?action=PING"
@@ -79,51 +148,90 @@ curl -s "https://www.rexxpository.org/cgi-bin/rxpip_server.rexx?action=PING"
 # SERVER: RXPIP/1.0 (Regina ...)
 ```
 
-Then a full publish/download round trip:
+Open `https://www.rexxpository.org/` in a browser: the (empty) package
+index should appear.
+
+## 8. Accounts: how people get to publish
+
+Accounts are **invite-only**: an open sign-up on a code repository is a
+supply-chain risk, because every user who can publish is someone whose
+code other people will run. There is no HTTP admin interface; the
+operator manages accounts on the server, as the Apache user so file
+ownership stays correct:
 
 ```bash
-tar czf /tmp/test-1.0.0.rxpkg -C /tmp/some/dir test.rexx
-curl -s -X POST \
-  -H "X-Rxpip-Name: test" -H "X-Rxpip-Version: 1.0.0" \
-  -H "X-Rxpip-Token: some-secret" \
-  --data-binary @/tmp/test-1.0.0.rxpkg \
-  "https://www.rexxpository.org/cgi-bin/rxpip_server.rexx?action=PUBLISH"
-# STATUS: OK ... MESSAGE: published
+ADMIN='sudo -u apache env RXPIP_REPO_ROOT=/var/www/rexxpository/repo regina -a /var/www/rexxpository/cgi-bin/rxpip_server.rexx admin'
 
-curl -s "https://www.rexxpository.org/cgi-bin/rxpip_server.rexx?action=INFO&name=test"
+$ADMIN adduser mike          # your own account; prints the token ONCE
+$ADMIN invite "for Anna"     # prints a single-use invite code ONCE
+$ADMIN users
+$ADMIN tokens mike
+$ADMIN newtoken mike ci      # extra token (e.g. for CI)
+$ADMIN revoke 1a2b3c4d       # revoke one token by id
+$ADMIN lock anna             # revoke ALL of a user's tokens
+$ADMIN owners mathutils
+$ADMIN setowners mathutils mike anna     # recovery: replace owner list
 ```
 
-If `PUBLISH` reports success but nothing shows up under
-`/var/www/rexxpository.org/repo`, re-check step 2 — this is almost
-always a permissions issue, not a protocol issue (see the callout above).
+A publisher then does, on their own machine:
 
-## 6. Header forwarding
+```bash
+rxpip config set REPO_URL https://www.rexxpository.org/cgi-bin/rxpip_server.rexx
+rxpip register --user=anna --invite=inv_xxxxxxxx_xxxxxxxx...   # saves her token
+rxpip publish mypkg.rxpkg --name=mypkg --version=1.0.0 --summary="..."
+rxpip token new --label=laptop        # more tokens, self-service
+rxpip owner add mypkg bob             # let another user publish
+```
 
-`PUBLISH` metadata (name/version/author/summary/requires/kind/platform/
-token) is read from `X-Rxpip-*` request headers, which Apache/mod_cgi
-forwards as `HTTP_X_RXPIP_*` environment variables per the CGI spec —
-this is standard Apache behavior and needs no special configuration. As
-a defense against any intermediary (a reverse proxy, a CDN, a minimal
-CGI handler in some other test setup) that might *not* forward custom
-headers, the server also accepts the same fields as query-string
-parameters, with headers taking precedence when both are present. You
-don't need to do anything for this; it's automatic.
+How it works:
 
-## 7. Backups
+- The **first publish of a name claims it**; the publisher becomes its
+  owner. Any owner can add or remove other owners (never the last one).
+- Tokens look like `rxp_<8 hex id>_<48 hex secret>` and are generated by
+  the server. The server stores only a salted SHA-256 of each; a token
+  cannot be recovered, only replaced. The client keeps its token in
+  `~/.rxpip/credentials.txt` (mode 600).
+- A token in the URL is refused (`TOKEN_IN_URL`): URLs end up in access
+  logs. Tokens are accepted only in the `X-Rxpip-Token` header.
+- Releases are immutable: re-publishing an existing version/kind/platform
+  is a 409. Publish a new version instead.
+- Uploads are capped (`RXPIP_MAX_UPLOAD`) and archives are validated
+  (regular files only, flat safe names, at most 200 members).
 
-Everything the server owns is plain files under `repo/`:
+## 9. Header forwarding
+
+`PUBLISH` metadata and the token are read from `X-Rxpip-*` request
+headers, which Apache forwards to CGI scripts as `HTTP_X_RXPIP_*`
+environment variables per the CGI spec; no configuration is needed. If
+you ever put a reverse proxy or CDN in front, make sure it forwards
+`X-Rxpip-*` headers. For the **non-secret** metadata only, the server
+also accepts query-string parameters as a fallback; the token never has a
+fallback.
+
+## 10. Backups
+
+Everything is plain files under `repo/`, including account data:
 
 ```
 repo/<name>/<version>/PACKAGE.META
 repo/<name>/<version>/ARTIFACTS.META
 repo/<name>/<version>/artifacts/<KIND>-<PLATFORM>.rxpkg
-repo/.auth/<name>.owner
+repo/.auth/users/<user>.user
+repo/.auth/tokens/<id>.tok           (salted hashes, not tokens)
+repo/.auth/invites/<id>.inv[.used]
+repo/.auth/owners/<package>.owners
+repo/.staging/                       (transient; safe to exclude)
 ```
 
-A regular `tar`/`rsync` of the `repo/` directory is a complete, restorable
-backup — no database involved.
+```bash
+sudo tar czf /root/rexxpository-$(date +%F).tgz --exclude=repo/.staging -C /var/www/rexxpository repo
+```
 
-## 8. Testing the server on Windows
+Keep the backup readable by root only: it contains the token hashes. No
+database is involved, so a restore is just unpacking into `repo/`
+followed by `restorecon -R`.
+
+## 11. Testing the server on Windows
 
 Production deployment targets Linux/Apache (above), but Regina testing
 for this project happens on a Windows Server host. Here's how to stand
@@ -217,23 +325,50 @@ ones working:
    Windows branch actually survives the round trip; try something with
    an embedded space and, separately, an embedded double-quote.
 
-If something in 2–6 doesn't work as described, the fix almost certainly
+7. **Account and security helpers** (new, all unverified on Windows):
+   `Sha256Hex` and `RandomHex` use PowerShell (`SHA256`/`RandomNumberGenerator`)
+   instead of `sha256sum` and `/dev/urandom`; run `rxpip_server.rexx admin
+   adduser test` and confirm it prints a token and that
+   `repo\.auth\tokens\*.tok` contains a `sha256$<32 hex>$<64 hex>` line.
+   `WriteNew` (atomic create) is only check-then-write on Windows, and
+   invite redemption uses `move` — fine for a test box, but concurrent
+   first-publish and concurrent invite redemption are **not** race-safe
+   there, which is one more reason production runs on Linux.
+   On the client, `credentials.txt` cannot be chmod 600 on Windows; it
+   relies on the permissions of your user profile.
+
+If something in 2–7 doesn't work as described, the fix almost certainly
 belongs in the one small platform-branch procedure responsible for that
 operation (§6 of ARCHITECTURE.md lists which one), not scattered
 elsewhere — that locality is the point of routing everything through
 the portability layer in the first place.
 
-## 9. Things to harden before wider/public use
+## 12. Troubleshooting on AlmaLinux
 
-The current auth model (first publish claims a package name with a
-shared-secret token, stored as a plain file) is intentionally minimal —
-enough to stop accidental or casual overwrites, not a real access-control
-system. Before opening this up beyond trusted publishers, consider:
+| Symptom | Likely cause and check |
+| --- | --- |
+| HTTP 500 and `(13)Permission denied` in `/var/log/httpd/error_log` | SELinux label or file mode on `cgi-bin`; re-run §3, then `ls -Z` |
+| PING works, PUBLISH says OK but nothing is written | `repo` not writable by `apache`, or not labelled `httpd_sys_rw_content_t` |
+| `sudo ausearch -m avc -ts recent` shows `httpd_sys_script_t` denials | read the denial; fix the label (don't disable SELinux); `sudo audit2why` explains it |
+| `Premature end of script headers` | Regina not found by the CGI (`which regina`, see §1), or a syntax error: run `sudo -u apache env GATEWAY_INTERFACE=CGI/1.1 REQUEST_METHOD=GET QUERY_STRING=action=PING regina /var/www/rexxpository/cgi-bin/rxpip_server.rexx` |
+| `SERVER_NO_HASH` / `SERVER_NO_RANDOM` | `sha256sum` or `/dev/urandom` unavailable to the confined CGI; check `audit.log` |
+| Works from the server, not from outside | `firewalld` (§5) or the Hetzner Cloud Firewall |
+| Upload of a large package fails with HTTP 413 | over `RXPIP_MAX_UPLOAD` (server) or `LimitRequestBody` (Apache) |
 
-- Real per-user accounts/tokens instead of one flat shared secret per
-  package
-- Rate limiting on `PUBLISH` (nothing currently stops someone from
-  hammering the endpoint)
-- HTTPS-only enforcement (redirect or refuse plain HTTP)
-- A size cap on uploaded artifacts (currently unbounded — `CONTENT_LENGTH`
-  is trusted as given)
+## 13. Not done yet (known gaps)
+
+- **Rate limiting.** Nothing throttles requests. Invite codes and tokens
+  carry 128/192 bits of randomness, so guessing is not a practical
+  attack, but a flood of requests is still possible; put `fail2ban` or
+  an Apache/edge rate limit in front for public use.
+- **No password or e-mail flow.** Lost tokens are replaced by the
+  operator (`newtoken`); there is no self-service recovery by design.
+- **No package deletion or yank** over HTTP: remove files on the server
+  by hand if you must (releases are meant to be immutable).
+- **Name policy.** First come, first served; there is no
+  typosquatting protection or reserved-name list.
+- **Concurrent owner-list edits** (two owners changing the same
+  package's owner list in the same instant) are last-writer-wins.
+- Windows server paths (PowerShell hashing and randomness, non-atomic
+  claims) are untested; see §11.
+
