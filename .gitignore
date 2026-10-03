@@ -1,0 +1,5 @@
+# local test state
+testrepo/
+*.rxpkg
+.rxpip/
+run_*.rexx
