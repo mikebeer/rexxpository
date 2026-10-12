@@ -96,6 +96,8 @@ action = translate(QGet(qstring, 'ACTION'))
 select
   when action = '' | action = 'HOME' then call Web_Home REPO_ROOT, AUTH_DIR, qstring
   when action = 'PKG'      then call Web_Package REPO_ROOT, AUTH_DIR, qstring
+  when action = 'SIGNUP'   then call Web_Signup AUTH_DIR, method_, clen
+  when action = 'REVIEW'   then call Web_Review AUTH_DIR, method_, clen, qstring
   when action = 'PING'     then call Action_Ping
   when action = 'LIST'     then call Action_List     REPO_ROOT
   when action = 'SEARCH'   then call Action_Search    REPO_ROOT, qstring
@@ -729,6 +731,7 @@ HtmlHeader: procedure
   say '.mute{color:var(--mute)} form{display:flex;gap:.5rem;margin-bottom:1.25rem}'
   say 'input[type=search]{flex:1;min-width:0;padding:.55rem .7rem;font-size:1rem;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}'
   say 'button{padding:.55rem 1rem;font-size:1rem;border-radius:6px;border:1px solid var(--line);background:var(--code);color:var(--fg);cursor:pointer}'
+  say 'form.f{display:block} form.f label{display:block;margin:.8rem 0 .2rem} form.f input[type=text],form.f input[type=email]{width:100%;box-sizing:border-box;padding:.55rem .7rem;font-size:1rem;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)} .hp{display:none}'
   say '.tbl{overflow-x:auto} footer{color:var(--mute);font-size:.85rem;margin-top:3rem}'
   say '</style></head><body>'
   say '<header><div><a href="' || Esc(value('SCRIPT_NAME',,'ENVIRONMENT')) || '">rexxpository</a> <span class="mute">&middot; the REXX package index</span></div></header>'
@@ -736,7 +739,9 @@ HtmlHeader: procedure
   return
 
 HtmlFooter: procedure
-  say '<footer>RXPIP &middot; install with <code>rxpip install &lt;name&gt;</code></footer>'
+  su = ''
+  if SignupEnabled() then su = ' &middot; <a href="' || Esc(value('SCRIPT_NAME',,'ENVIRONMENT')) || '?action=SIGNUP">request an account</a>'
+  say '<footer>RXPIP &middot; install with <code>rxpip install &lt;name&gt;</code>' || su || '</footer>'
   say '</main></body></html>'
   return
 
@@ -1107,6 +1112,242 @@ Action_Register: procedure
   say 'USER:' user
   say 'TOKEN:' tok
   say 'MESSAGE: account created. Store this token now; it is shown only once.'
+  return
+
+/* ---- moderated web sign-up ------------------------------------------
+   Visitor fills in a form (name, e-mail, location). The server stores a
+   pending request and mails the ADMIN a review link. The admin opens the
+   link (a page with Approve / Reject buttons -- a GET never changes
+   anything, so mail scanners cannot approve by prefetching). Approval
+   creates a single-use invite and mails it to the applicant, who then
+   runs  rxpip register --user=<name> --invite=<code>.
+   Needs: RXPIP_ADMIN_EMAIL (sign-up is off when unset) and a working
+   sendmail (or RXPIP_SENDMAIL to name another command that reads a
+   message on stdin). RXPIP_PUBLIC_URL = full URL of this script, used in
+   links; RXPIP_MAIL_FROM = sender address. */
+
+SignupEnabled: procedure
+  return IsSafeEmail(value('RXPIP_ADMIN_EMAIL',,'ENVIRONMENT'))
+
+IsSafeEmail: procedure
+  parse arg e
+  if length(e) < 5 | length(e) > 100 then return 0
+  if verify(e, 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._%+-@') > 0 then return 0
+  if countstr('@', e) \= 1 then return 0
+  parse var e loc '@' dom
+  if loc = '' | dom = '' | pos('.', dom) = 0 then return 0
+  if left(dom, 1) = '.' | right(dom, 1) = '.' | pos('..', e) > 0 then return 0
+  return left(e, 1) \= '-'
+
+PublicUrl: procedure
+  u = value('RXPIP_PUBLIC_URL',,'ENVIRONMENT')
+  if u \= '' then return u
+  sch = 'http'
+  if translate(value('HTTPS',,'ENVIRONMENT')) = 'ON' then sch = 'https'
+  return sch || '://' || value('SERVER_NAME',,'ENVIRONMENT') || value('SCRIPT_NAME',,'ENVIRONMENT')
+
+/* send a plain-text mail; 1 = handed to the mail system */
+SendMail: procedure
+  parse arg to, subject, body
+  if IsWindows() then return 0
+  from = value('RXPIP_MAIL_FROM',,'ENVIRONMENT')
+  if from = '' then from = 'rxpip@' || value('SERVER_NAME',,'ENVIRONMENT')
+  if \IsSafeEmail(from) | \IsSafeEmail(to) | \IsSafeMeta(subject, 200) then return 0
+  cmd = value('RXPIP_SENDMAIL',,'ENVIRONMENT')
+  if cmd = '' then cmd = '/usr/sbin/sendmail -t -i'
+  f = TempDir() || '/rxpip_mail_' || time('L') || '_' || random(1,99999) || '.tmp'
+  msg = 'From: ' || from || '0a'x || 'To: ' || to || '0a'x || 'Subject: ' || subject || '0a'x ||,
+        'Content-Type: text/plain; charset=utf-8' || '0a'x || '0a'x || body || '0a'x
+  call charout f, msg
+  call stream f, 'c', 'close'
+  address system cmd '< "' || f || '" > /dev/null 2>&1'
+  r = (rc = 0)
+  call DelFile f
+  return r
+
+/* pending request ids; expired ones are removed on the way */
+PendingIds: procedure
+  parse arg authdir
+  ids = DirBasesStr(authdir || '/requests', '.req')
+  out = ''
+  do i = 1 to words(ids)
+    f = authdir || '/requests/' || word(ids, i) || '.req'
+    d = FileField(f, 'DAY')
+    if datatype(d, 'W') & date('B') - d > 14 then call DelFile f
+    else out = out word(ids, i)
+  end
+  return strip(out)
+
+Web_Signup: procedure
+  parse arg authdir, method_, clen
+  self = Esc(value('SCRIPT_NAME',,'ENVIRONMENT'))
+  if \SignupEnabled() then do
+    call HtmlHeader 404, 'Sign up'
+    say '<h1>Sign up</h1><p>Online sign-up is not enabled on this repository. Ask the administrator for an invite code.</p>'
+    call HtmlFooter
+    return
+  end
+  user = ''; email = ''; loc = ''; err = ''
+  if translate(method_) = 'POST' then do
+    if \datatype(clen, 'W') | clen < 1 | clen > 2000 then do
+      call HtmlHeader 413, 'Sign up'
+      say '<h1>Sign up</h1><p>Request too large.</p>'
+      call HtmlFooter
+      return
+    end
+    body = charin(, , clen)
+    user = Lower(strip(QGet(body, 'USER')))
+    email = strip(QGet(body, 'EMAIL'))
+    loc = strip(QGet(body, 'LOCATION'))
+    hp = QGet(body, 'WEBSITE')
+    if hp \= '' then err = 'Request rejected.'
+    else if \IsSafeUser(user) then err = 'Name: 3-32 characters, a-z 0-9 _ - (lowercase), not starting with -.'
+    else if \IsSafeEmail(email) then err = 'Please enter a valid e-mail address.'
+    else if loc = '' | \IsSafeMeta(loc, 80) then err = 'Location: 1-80 characters, no control characters.'
+    else if UserExists(authdir, user) then err = 'That name is already taken.'
+    else if Sha256Hex('rxpip') = '' then err = 'The server cannot process sign-ups right now.'
+    else do
+      ids = PendingIds(authdir)
+      ip = value('REMOTE_ADDR',,'ENVIRONMENT')
+      same = 0
+      dup = 0
+      do i = 1 to words(ids)
+        f = authdir || '/requests/' || word(ids, i) || '.req'
+        if FileField(f, 'USER') = user then dup = 1
+        if ip \= '' & FileField(f, 'IP') = ip then same = same + 1
+      end
+      if dup then err = 'A request for that name is already waiting for approval.'
+      else if words(ids) >= 100 | same >= 3 then err = 'Too many pending requests. Please try again later.'
+    end
+    if err = '' then do
+      call EnsureDir authdir || '/requests'
+      id = RandomHex(4)
+      key = RandomHex(16)
+      rec = ''
+      if id \= '' & key \= '' then rec = MakeSecretRecord(key)
+      if rec = '' then err = 'The server could not create a request.'
+      else do
+        c = 'USER: ' || user || '0a'x || 'EMAIL: ' || email || '0a'x || 'LOCATION: ' || loc || '0a'x ||,
+            'IP: ' || value('REMOTE_ADDR',,'ENVIRONMENT') || '0a'x || 'DAY: ' || date('B') || '0a'x ||,
+            'CREATED: ' || date('S') || ' ' || time() || '0a'x || 'HASH: ' || rec || '0a'x
+        rf = authdir || '/requests/' || id || '.req'
+        if \WriteNew(rf, c) then err = 'The server could not create a request.'
+        else do
+          link = PublicUrl() || '?action=REVIEW&req=' || id || '&key=' || key
+          mb = 'New rxpip account request' || '0a'x || '0a'x ||,
+               'Name:     ' || user || '0a'x || 'E-mail:   ' || email || '0a'x ||,
+               'Location: ' || loc || '0a'x || 'From IP:  ' || value('REMOTE_ADDR',,'ENVIRONMENT') || '0a'x || '0a'x ||,
+               'Review (approve or reject):' || '0a'x || link || '0a'x || '0a'x ||,
+               'The link is valid for 14 days. Do not forward it.'
+          if \SendMail(value('RXPIP_ADMIN_EMAIL',,'ENVIRONMENT'), 'rxpip account request: ' || user, mb) then do
+            call DelFile rf
+            err = 'The server could not send the notification mail. Please try again later.'
+          end
+        end
+      end
+    end
+    if err = '' then do
+      call HtmlHeader 200, 'Sign up'
+      say '<h1>Request received</h1>'
+      say '<p>Thank you, <b>' || Esc(user) || '</b>. Your request has been sent to the administrator.'
+      say 'When it is approved you will receive an invite code at <b>' || Esc(email) || '</b>.</p>'
+      call HtmlFooter
+      return
+    end
+  end
+  if err \= '' then call HtmlHeader 400, 'Sign up'
+  else call HtmlHeader 200, 'Sign up'
+  say '<h1>Request an account</h1>'
+  say '<p class="mute">Accounts are approved by the administrator. You will get an invite code by e-mail.</p>'
+  if err \= '' then say '<p><b>' || Esc(err) || '</b></p>'
+  say '<form class="f" method="post" action="' || self || '?action=SIGNUP">'
+  say '<label for="user">Name (your login, e.g. mike)</label><input type="text" id="user" name="user" maxlength="32" required value="' || Esc(user) || '">'
+  say '<label for="email">E-mail address</label><input type="email" id="email" name="email" maxlength="100" required value="' || Esc(email) || '">'
+  say '<label for="loc">Location (city, country)</label><input type="text" id="loc" name="location" maxlength="80" required value="' || Esc(loc) || '">'
+  say '<div class="hp"><label>Leave empty <input type="text" name="website" tabindex="-1" autocomplete="off"></label></div>'
+  say '<p><button type="submit">Send request</button></p></form>'
+  call HtmlFooter
+  return
+
+Web_Review: procedure
+  parse arg authdir, method_, clen, qstring
+  self = Esc(value('SCRIPT_NAME',,'ENVIRONMENT'))
+  post = (translate(method_) = 'POST')
+  if post then do
+    if \datatype(clen, 'W') | clen < 1 | clen > 2000 then clen = 0
+    body = charin(, , clen)
+    id = QGet(body, 'REQ'); key = QGet(body, 'KEY'); decision = translate(QGet(body, 'DECISION'))
+  end
+  else do
+    id = QGet(qstring, 'REQ'); key = QGet(qstring, 'KEY'); decision = ''
+  end
+  f = authdir || '/requests/' || id || '.req'
+  ok = IsHex(id, 8) & IsHex(key, 32) & FileExists(f)
+  if ok then ok = VerifySecret(key, FileField(f, 'HASH'))
+  if ok then do
+    d = FileField(f, 'DAY')
+    if \datatype(d, 'W') | date('B') - d > 14 then do
+      call DelFile f
+      ok = 0
+    end
+  end
+  if \ok then do
+    call HtmlHeader 404, 'Review'
+    say '<h1>Request not found</h1><p>The link is invalid, expired, or the request was already handled.</p>'
+    call HtmlFooter
+    return
+  end
+  user = FileField(f, 'USER'); email = FileField(f, 'EMAIL'); loc = FileField(f, 'LOCATION')
+  if post & decision = 'REJECT' then do
+    call DelFile f
+    call HtmlHeader 200, 'Rejected'
+    say '<h1>Rejected</h1><p>The request from <b>' || Esc(user) || '</b> was discarded.</p>'
+    call HtmlFooter
+    return
+  end
+  if post & decision = 'APPROVE' then do
+    if UserExists(authdir, user) then do
+      call DelFile f
+      call HtmlHeader 409, 'Review'
+      say '<h1>Already exists</h1><p>A user named <b>' || Esc(user) || '</b> exists already; the request was discarded.</p>'
+      call HtmlFooter
+      return
+    end
+    inv = CreateInvite(authdir, 'web sign-up: ' || user || ' <' || email || '>')
+    if inv = '' then do
+      call HtmlHeader 500, 'Review'
+      say '<h1>Error</h1><p>The server could not create an invite.</p>'
+      call HtmlFooter
+      return
+    end
+    parse var inv . '_' iid '_' .
+    mb = 'Your rxpip account request has been approved.' || '0a'x || '0a'x ||,
+         'Name:        ' || user || '0a'x || 'Invite code: ' || inv || '0a'x || '0a'x ||,
+         'Create your account (the code works once):' || '0a'x ||,
+         '  rxpip register --user=' || user || ' --invite=' || inv || '0a'x || '0a'x ||,
+         'Repository: ' || PublicUrl() || '0a'x
+    if \SendMail(email, 'Your rxpip account is approved', mb) then do
+      call DelFile authdir || '/invites/' || iid || '.inv'
+      call HtmlHeader 500, 'Review'
+      say '<h1>Mail failed</h1><p>The invite mail to the applicant could not be sent. The request is still pending; try again.</p>'
+      call HtmlFooter
+      return
+    end
+    call DelFile f
+    call HtmlHeader 200, 'Approved'
+    say '<h1>Approved</h1><p>An invite code was e-mailed to <b>' || Esc(email) || '</b> for <b>' || Esc(user) || '</b>.</p>'
+    call HtmlFooter
+    return
+  end
+  call HtmlHeader 200, 'Review account request'
+  say '<h1>Account request</h1>'
+  say '<table><tr><th>Name</th><td>' || Esc(user) || '</td></tr><tr><th>E-mail</th><td>' || Esc(email) || '</td></tr>'
+  say '<tr><th>Location</th><td>' || Esc(loc) || '</td></tr><tr><th>Requested</th><td>' || Esc(FileField(f, 'CREATED')) || '</td></tr></table>'
+  say '<form class="f" method="post" action="' || self || '?action=REVIEW">'
+  say '<input type="hidden" name="req" value="' || Esc(id) || '"><input type="hidden" name="key" value="' || Esc(key) || '">'
+  say '<p><button type="submit" name="decision" value="approve">Approve</button> '
+  say '<button type="submit" name="decision" value="reject">Reject</button></p></form>'
+  call HtmlFooter
   return
 
 Action_Whoami: procedure

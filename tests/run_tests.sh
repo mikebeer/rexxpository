@@ -18,6 +18,16 @@ mkdir -p "$REPO"
 cleanup() { [ -n "${HPID:-}" ] && kill "$HPID" 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT
 
+# fake sendmail: stores each message so the tests can read it
+mkdir -p "$WORK/mail"
+cat > "$WORK/sendmail.sh" <<SM
+#!/bin/sh
+cat > "$WORK/mail/\$(date +%s%N).txt"
+SM
+chmod +x "$WORK/sendmail.sh"
+export RXPIP_ADMIN_EMAIL=admin@example.org RXPIP_SENDMAIL="$WORK/sendmail.sh" \
+       RXPIP_PUBLIC_URL="http://127.0.0.1:$PORT/cgi-bin/rxpip_server.rexx" RXPIP_MAIL_FROM=rxpip@example.org
+
 python3 "$ROOT/tests/cgi_harness.py" --port "$PORT" \
   --script "$ROOT/server/rxpip_server.rexx" --repo "$REPO" &
 HPID=$!
@@ -424,6 +434,48 @@ expect "whoami after logout" "$($RX whoami 2>&1)" "not logged in"
 out=$($RX publish "$WORK/strutils.rxpkg" --name=ginapkg --version=1.0.1 2>&1)
 expect "publish without login is refused locally" "$out" "login"
 unset RXPIP_HOME
+
+
+# ============================================================================
+section "moderated web sign-up"
+SU="$BASE?action=SIGNUP"
+expect "sign-up form is shown" "$(curl -s "$SU")" 'name="email"'
+post() { curl -s -w '\n%{http_code}' -X POST --data "$1" "$SU"; }
+r=$(post "user=Zed&email=zed%40example.com&location=Zurich%2C+CH")
+expect "valid request accepted" "$r" "Request received"
+M1=$(ls "$WORK/mail"/* | head -1)
+expect "admin mail goes to the admin" "$(cat "$M1")" "To: admin@example.org"
+expect "admin mail names the applicant" "$(cat "$M1")" "E-mail:   zed@example.com"
+expect "admin mail carries the location" "$(cat "$M1")" "Zurich, CH"
+LINK=$(grep -o 'http[^ ]*action=REVIEW[^ ]*' "$M1" | head -1)
+[ -n "$LINK" ] && ok "admin mail has a review link" || bad "admin mail has a review link"
+expect "duplicate pending name refused" "$(post "user=zed&email=z2%40example.com&location=X")" "already waiting"
+expect "bad e-mail refused" "$(post "user=zed2&email=nonsense&location=X")" "valid e-mail"
+expect "bad name refused" "$(post "user=a&email=a%40example.com&location=X")" "Name:"
+expect "newline in location refused" "$(post "user=zed3&email=a%40example.com&location=X%0AB")" "Location:"
+expect "honeypot refused" "$(post "user=zed4&email=a%40example.com&location=X&website=spam")" "rejected"
+expect "existing user name refused" "$(post "user=alice&email=a%40example.com&location=X")" "taken"
+n=$(ls "$WORK/mail" | wc -l)
+expect "rejected requests send no mail" "$n" "1"
+page=$(curl -s "$LINK")
+expect "GET review shows the request" "$page" "zed@example.com"
+expect "GET review has an approve button" "$page" 'value="approve"'
+[ "$(ls "$WORK/mail" | wc -l)" = 1 ] && ok "GET review sends nothing and approves nothing" || bad "GET review sends nothing"
+expect "bad key is not found" "$(curl -s "${LINK%key=*}key=00000000000000000000000000000000")" "invalid, expired"
+REQ=$(printf '%s' "$LINK" | sed 's/.*req=\([0-9a-f]*\)&.*/\1/'); KEY=${LINK##*key=}
+expect "approve works" "$(curl -s -X POST --data "req=$REQ&key=$KEY&decision=approve" "$BASE?action=REVIEW")" "Approved"
+M2=$(ls -t "$WORK/mail"/* | head -1)
+expect "applicant mail goes to the applicant" "$(cat "$M2")" "To: zed@example.com"
+ZINV=$(grep -o 'inv_[0-9a-f_]*' "$M2" | head -1)
+out=$(curl -s -X POST -H "X-Rxpip-Invite: $ZINV" -H "X-Rxpip-User: zed" "$BASE?action=REGISTER")
+expect "the mailed invite registers the user" "$out" "STATUS: OK"
+expect "request link is dead after approval" "$(curl -s "$LINK")" "invalid, expired"
+r=$(post "user=yan&email=yan%40example.com&location=Bern")
+LINK2=$(grep -o 'http[^ ]*action=REVIEW[^ ]*' "$(ls -t "$WORK/mail"/* | head -1)" | head -1)
+REQ=$(printf '%s' "$LINK2" | sed 's/.*req=\([0-9a-f]*\)&.*/\1/'); KEY=${LINK2##*key=}
+expect "reject works" "$(curl -s -X POST --data "req=$REQ&key=$KEY&decision=reject" "$BASE?action=REVIEW")" "Rejected"
+expect "rejected request is gone" "$(curl -s "$LINK2")" "invalid, expired"
+expect "home page links to sign-up" "$(curl -s "$BASE")" "request an account"
 
 # ============================================================================
 echo

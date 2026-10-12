@@ -198,6 +198,27 @@ How it works:
 - Uploads are capped (`RXPIP_MAX_UPLOAD`) and archives are validated
   (regular files only, flat safe names, at most 200 members).
 
+### Web sign-up with moderation (optional)
+
+Visitors can request an account at `?action=SIGNUP` (name, e-mail, location).
+The server mails the administrator a review link; opening it shows the
+request with **Approve** / **Reject** buttons. Approval mails the applicant a
+single-use invite code, which they redeem with `rxpip register`. Pending
+requests expire after 14 days (max. 100 pending, 3 per IP address).
+
+Enable it in the virtual host (sign-up is off while `RXPIP_ADMIN_EMAIL` is unset):
+
+```apache
+    SetEnv RXPIP_ADMIN_EMAIL   you@example.org
+    SetEnv RXPIP_PUBLIC_URL    https://www.rexxpository.org/cgi-bin/rxpip_server.rexx
+    SetEnv RXPIP_MAIL_FROM     rxpip@rexxpository.org
+```
+
+It needs a working local MTA: `dnf install postfix && systemctl enable --now postfix`
+(`/usr/sbin/sendmail`; set `RXPIP_SENDMAIL` to use another command that reads a
+message on stdin). On SELinux add `setsebool -P httpd_can_sendmail 1`.
+Set SPF/DKIM for the sender domain, or the mails land in spam.
+
 ## 9. Header forwarding
 
 `PUBLISH` metadata and the token are read from `X-Rxpip-*` request
