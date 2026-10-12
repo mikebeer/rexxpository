@@ -62,7 +62,14 @@ signal on novalue name Bomb
    delimited token, so no downstream parsing has to re-guess word
    boundaries that the shell already resolved for us */
 allargs = ''
-do i = 1 to arg()
+if IsOoRexx() & arg() = 1 & value('RXPIP_QUOTED',,'ENVIRONMENT') \= '' then do
+  /* ooRexx hands the whole command line over as ONE string; the launcher
+     (client/oorexx/rxpip-oorexx[.bat]) double-quotes every argument so we
+     can split it again here. RXPIP_QUOTED=1: backslash escapes inside the
+     quotes (sh launcher); =2: no escapes (Windows launcher). */
+  allargs = SplitQuoted(arg(1), value('RXPIP_QUOTED',,'ENVIRONMENT'))
+end
+else do i = 1 to arg()
   allargs = allargs || arg(i) || '01'x
 end
 
@@ -405,10 +412,12 @@ CmdRun: procedure expose home cfg.
      survives the trip through the 'cd ... && interp ...' command line
      below intact, instead of being re-split by the shell. */
   passthru = ''
+  rawargs = ''
   do while argrest \= ''
     parse var argrest one '01'x argrest
     if one = '' then iterate
     passthru = passthru || ' ' || ShellQuote(one)
+    rawargs = rawargs || one || '01'x
   end
   if fn = '' | \FileExists(fn) then do
     say "rxpip: file not found: '" || fn || "'"
@@ -423,10 +432,31 @@ CmdRun: procedure expose home cfg.
   merged = home || '/run_' || time('L') || '_' || random(1,99999) || '.rexx'
   call MergeScript fn, home, merged
 
-  interp = cfg.INTERPRETER
-  if interp = '' then interp = 'regina'
+  interp = Interpreter()
 
-  runrc = RunInDir(Dirname(merged), interp || ' -a "./' || Basename(merged) || '"' || passthru)
+  if IsOoRexx() then do
+    /* no 'rexx -a' in ooRexx: a small runner calls the merged program as an
+       external routine with real separate arguments */
+    runner = home || '/runner_' || time('L') || '_' || random(1,99999) || '.rexx'
+    call charout runner, "f = value('RXPIP_RUN_FILE',,'ENVIRONMENT')" || '0a'x
+    call charout runner, "s = value('RXPIP_RUN_ARGS',,'ENVIRONMENT')" || '0a'x
+    call charout runner, "a = .array~new" || '0a'x
+    call charout runner, "do while s \= ''" || '0a'x
+    call charout runner, "  parse var s one '01'x s" || '0a'x
+    call charout runner, "  a~append(one)" || '0a'x
+    call charout runner, "end" || '0a'x
+    call charout runner, "res = .routine~newFile(f)~callWith(a)" || '0a'x
+    call charout runner, "if datatype(res, 'W') then exit res" || '0a'x
+    call charout runner, "exit 0" || '0a'x
+    call stream runner, 'c', 'close'
+    call value 'RXPIP_RUN_FILE', merged, 'ENVIRONMENT'
+    call value 'RXPIP_RUN_ARGS', translate(rawargs, '01'x, '01'x), 'ENVIRONMENT'
+    runrc = RunInDir(Dirname(merged), interp || ' "' || runner || '"')
+    call value 'RXPIP_RUN_FILE', '', 'ENVIRONMENT'
+    call value 'RXPIP_RUN_ARGS', '', 'ENVIRONMENT'
+    call DelFile runner
+  end
+  else runrc = RunInDir(Dirname(merged), interp || ' -a "./' || Basename(merged) || '"' || passthru)
   call DelFile merged
   exit runrc
 
@@ -574,7 +604,7 @@ CmdRegister: procedure expose home
   end
   repo = GetConfigValue(home, 'REPO_URL')
   out = ServerPost(repo, 'REGISTER', '', 'X-Rxpip-User: ' || user, 'X-Rxpip-Invite: ' || inv, '')
-  if word(out,1) \= 'STATUS:' | word(out,2) \= 'OK' then do
+  if StanzaField(out, 'STATUS') \= 'OK' then do
     call ShowResponse out
     exit 1
     return
@@ -597,7 +627,7 @@ CmdLogin: procedure expose home
     return
   end
   out = ServerPost(repo, 'WHOAMI', '', '', 'X-Rxpip-Token: ' || t, '')
-  if word(out,1) \= 'STATUS:' | word(out,2) \= 'OK' then do
+  if StanzaField(out, 'STATUS') \= 'OK' then do
     call ShowResponse out
     exit 1
     return
@@ -958,7 +988,7 @@ ShowResponse: procedure
     say 'rxpip: no response from server'
     return 1
   end
-  if word(out,1) = 'STATUS:' & word(out,2) = 'OK' then return 0
+  if StanzaField(out, 'STATUS') = 'OK' then return 0
   return 1
 
 /* =======================================================================
@@ -970,8 +1000,7 @@ ShowResponse: procedure
    artifact when one has been published; SOURCE/any always matches
    as the universal fallback (see server's artifact-model note). */
 PlatformTag: procedure expose cfg.
-  interp = cfg.INTERPRETER
-  if interp = '' then interp = 'regina'
+  interp = Interpreter()
   if IsWindows() then do
     /* no shell-out needed -- Windows sets these env vars itself */
     os = 'windows'
@@ -1240,6 +1269,54 @@ EnsureDir: procedure
    (isolated procedures don't share RC with their caller in REXX, so
    this must be captured and returned explicitly rather than left for
    the caller to read RC after the CALL) */
+/* interpreter used to run programs: RXPIP_INTERPRETER (set by the ooRexx
+   launcher) beats the shared config.txt setting */
+Interpreter: procedure expose cfg.
+  i = value('RXPIP_INTERPRETER',,'ENVIRONMENT')
+  if i = '' then i = cfg.INTERPRETER
+  if i = '' then i = 'regina'
+  return i
+
+IsOoRexx: procedure
+  parse version v
+  return pos('ooRexx', v) > 0
+
+/* split a command line made of double-quoted arguments into '01'x-terminated
+   tokens. mode 1: \" and \\ are escapes inside quotes; mode 2: no escapes */
+SplitQuoted: procedure
+  parse arg s, mode
+  out = ''
+  cur = ''
+  inq = 0
+  has = 0
+  i = 1
+  do while i <= length(s)
+    c = substr(s, i, 1)
+    if inq then do
+      if mode = 1 & c = '\' & i < length(s) then do
+        i = i + 1
+        cur = cur || substr(s, i, 1)
+      end
+      else if c = '"' then inq = 0
+      else cur = cur || c
+    end
+    else if c = '"' then do
+      inq = 1
+      has = 1
+    end
+    else if c = ' ' | c = '09'x then do
+      if has | cur \= '' then do
+        out = out || cur || '01'x
+        cur = ''
+        has = 0
+      end
+    end
+    else cur = cur || c
+    i = i + 1
+  end
+  if has | cur \= '' then out = out || cur || '01'x
+  return out
+
 RunInDir: procedure
   parse arg dir, cmdline
   if IsWindows() then 'cd /d "' || translate(dir,'\','/') || '" && ' || cmdline
@@ -1247,5 +1324,6 @@ RunInDir: procedure
   return rc
 
 Bomb:
+  if value("RXPIP_DEBUG",,"ENVIRONMENT") \= "" then say "DEBUG:" sigl sourceline(sigl)
   say 'rxpip: internal error at line' sigl':' errortext(rc)
   exit 1

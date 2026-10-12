@@ -1,0 +1,12 @@
+#!/bin/sh
+# RXPIP launcher for ooRexx. Classic-REXX packages (SOURCE/any) are shared
+# with the Regina client: same ~/.rxpip store, same credentials.
+# ooRexx passes the command line as ONE string, so every argument is
+# double-quoted here and split again inside rxpip.rexx.
+D=$(cd "$(dirname "$0")/.." && pwd)
+q=""
+for a in "$@"; do
+  e=$(printf '%s' "$a" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  q="$q \"$e\""
+done
+RXPIP_QUOTED=1 RXPIP_INTERPRETER=${RXPIP_INTERPRETER:-rexx} exec rexx "$D/rxpip.rexx" "$q"
