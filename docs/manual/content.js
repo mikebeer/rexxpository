@@ -25,7 +25,8 @@ module.exports = function (D) {
   D.h3('Summary of changes');
   D.p('This edition is kept up to date as RXPIP grows; each change is listed here, newest first.');
   D.bullets([
-    '**12 October 2026.** First edition. Covers the server and client as they stand after the hardening work of early October: header-only tokens, invitation-only accounts, per-package owner lists, upload limits, archive checks, the read-only web interface, and `>=` version requirements in `REQUIRE` lines.',
+    '**12 October 2026 (second edition).** Clients for ooRexx, NetRexx and cREXX in addition to Regina (artifact platforms `any`, `netrexx`, `crexx`); moderated sign-up through the web interface, with an approval mail to the administrator; a test matrix that runs one scenario against every client.',
+    '**12 October 2026 (first edition).** First edition. Covers the server and client as they stand after the hardening work of early October: header-only tokens, invitation-only accounts, per-package owner lists, upload limits, archive checks, the read-only web interface, and `>=` version requirements in `REQUIRE` lines.',
   ]);
 
   // ------------------------------------------------------------ Chapter 1
@@ -33,9 +34,9 @@ module.exports = function (D) {
   D.p('RXPIP is a package manager for REXX in the spirit of `pip` for Python. A package is a small archive of REXX source, a name and a version. A repository stores packages and serves them over HTTP or HTTPS. The `rxpip` client, itself a REXX program, talks to the repository, installs packages on your computer and builds programs that use them.');
   D.h2('The parts of RXPIP');
   D.table(['Part', 'What it is', 'Written in'], [
-    ['Client', 'The `rxpip` command: search, install, run, build, publish, log in', 'Regina REXX'],
+    ['Client', 'The `rxpip` command: search, install, run, build, publish, log in. One client per REXX family; all behave the same', 'Regina REXX / ooRexx, NetRexx, cREXX'],
     ['Server', 'A CGI program run by Apache; stores packages, accounts and owners as plain files', 'Regina REXX'],
-    ['Web interface', 'Read-only package index, search and package pages served by the same CGI program', 'Regina REXX (HTML)'],
+    ['Web interface', 'Package index, search, package pages and the account-request form served by the same CGI program', 'Regina REXX (HTML)'],
     ['Archive', 'A package file: a gzip-compressed tar of `.rexx` source files, extension `.rxpkg`', '—'],
   ], [1500, 6038, 2100], 'The parts of RXPIP');
   D.p('There is deliberately only one server implementation. The repository does not care which REXX interpreter will eventually run a package; it stores what the publisher gives it and labels it (see “Artifacts” below).');
@@ -55,12 +56,21 @@ module.exports = function (D) {
   D.h2('Artifacts: source and bytecode');
   D.p('Each version of a package can carry several //artifacts//. An artifact has a //kind// and a //platform//:');
   D.table(['Kind', 'Platform', 'Meaning'], [
-    ['`SOURCE`', '`any`', 'Portable classic REXX source. The default, and what every client can use.'],
+    ['`SOURCE`', '`any`', 'Classic REXX source. The default; installed by the Regina and ooRexx clients.'],
+    ['`SOURCE`', '`netrexx`', 'NetRexx source (`.nrx`, one class per file); installed by the NetRexx client.'],
+    ['`SOURCE`', '`crexx`', 'cREXX Level B source (`.crexx` modules); installed by the cREXX client.'],
     ['`BYTECODE`', 'for example `crexx-linux-x86_64`', 'A precompiled form for one interpreter, operating system and architecture. Optional; published in addition to the source artifact, never instead of it.'],
   ], [1500, 3200, 4938], 'Artifact kinds');
-  D.p('When installing, the client asks the server which artifacts exist for the version, takes an exact match for its own platform tag if there is one, and otherwise falls back to `SOURCE`/`any`. In this release only source artifacts are in use; the bytecode kind is reserved for later (see Chapter 11).');
+  D.p('When installing, the client asks the server which artifacts exist for the version, takes an exact match for its own platform tag if there is one, and otherwise falls back to the source artifact for its own language (`any`, `netrexx` or `crexx`). A client never installs another language’s artifact. In this release only source artifacts are in use; the bytecode kind is reserved for later (see Chapter 11).');
   D.h2('Supported REXX interpreters');
-  D.p('The client and server are written for Regina REXX 3.9 and run on it. Packages are classic REXX source and run wherever the merged program runs. cREXX in its current typed form, ooRexx and NetRexx are not supported by this release; the artifact model leaves room for them.');
+  D.p('The server is written for Regina REXX 3.9 and serves every client. There is one client for each family of REXX:');
+  D.table(['Interpreter', 'Client', 'Installs', 'What `rxpip run` does'], [
+    ['Regina 3.9', '`client/rxpip.rexx`', '`SOURCE`/`any`', 'merges program and packages into one REXX file and runs it'],
+    ['ooRexx 5.x', '`client/oorexx/rxpip-oorexx`', '`SOURCE`/`any` (same packages as Regina)', 'the same merge, started through a small runner'],
+    ['NetRexx 4.x', '`client/netrexx/rxpip-netrexx`', '`SOURCE`/`netrexx`', 'compiles program and package classes with NetRexxC, runs the class'],
+    ['cREXX 1.0 beta 3', '`client/crexx/rxpip-crexx`', '`SOURCE`/`crexx`', 'compiles with `rxc`, assembles with `rxas`, runs with `rxvm`'],
+  ], [1500, 2700, 2300, 3138], 'The clients');
+  D.p('All clients use the same commands, print the same messages and share the settings and the login in the home directory. Where this manual shows `rxpip`, use the launcher for your interpreter.');
 
   // ------------------------------------------------------------ Chapter 2
   D.chapter('Installing the Client');
@@ -86,6 +96,17 @@ module.exports = function (D) {
     'Add that folder to your `PATH`, open a new command prompt and run `rxpip help`.',
   ]);
   D.p('`rxpip.bat` contains a single command, `regina -a "%~dp0rxpip.rexx" %*`, which finds the REXX file next to itself.');
+  D.h2('The other clients');
+  D.p('**ooRexx.** Needs ooRexx 5 (`rexx`) and the same curl and tar. Use the launcher `client/oorexx/rxpip-oorexx` (Linux, macOS) or `rxpip-oorexx.bat` (Windows); it passes the arguments in a form the shared client can split again, because ooRexx hands over the command line as one string. The classic packages you install are the same ones the Regina client uses.');
+  D.p('**NetRexx.** Needs Java 8 or later and `NetRexxC.jar` from the NetRexx distribution. Set `NETREXX_JAR` to its path (or put the jar next to the launcher) and run `client/netrexx/rxpip-netrexx` or `rxpip-netrexx.bat`. The launcher compiles `Rxpip.nrx` the first time it runs.');
+  D.p('**cREXX.** Needs cREXX 1.0 beta 3 or later: `rxc`, `rxas` and `rxvm` on the `PATH`, or `CREXX_HOME` set to the installation. Run `client/crexx/rxpip-crexx` or `rxpip-crexx.bat`; the client is compiled on first use.');
+  D.code([
+    '$ export NETREXX_JAR=$HOME/netrexx/lib/NetRexxC.jar',
+    '$ client/netrexx/rxpip-netrexx install nxutils',
+    '$ client/crexx/rxpip-crexx install cxutils',
+    '$ client/oorexx/rxpip-oorexx list',
+  ], 'Using the other clients');
+  D.p('Each language keeps its installed packages apart: Regina and ooRexx use `lib/`, `pkgs/` and `installed.txt` in the home directory; NetRexx uses the `netrexx/` subdirectory and cREXX the `crexx/` subdirectory with the same layout. `config.txt`, `credentials.txt` and `cache/` are shared.');
   D.h2('Pointing the client at a repository');
   D.p('The client keeps its settings and its installed packages in a directory called the //home//: `~/.rxpip` on Linux and macOS, `%USERPROFILE%\\.rxpip` on Windows, or the directory named by the environment variable `RXPIP_HOME`. The first run creates it with default settings:');
   D.code([
@@ -241,6 +262,15 @@ module.exports = function (D) {
     '**Metadata is set once per version** by its first artifact. If a later artifact of the same version (for example a bytecode artifact) supplies different metadata, the server keeps the original and says so in a `NOTE:` line.',
     'A refused upload leaves nothing behind and does not claim the name.',
   ]);
+  D.h2('Packages for NetRexx and cREXX');
+  D.p('A NetRexx package is a tar of `.nrx` files, each defining one class; a cREXX package is a tar of `.crexx` files, each a module with a `namespace` line. Publish them with the platform that names the language, so that only the matching client installs them:');
+  D.code([
+    '$ tar czf nxutils.rxpkg NxUtils.nrx',
+    '$ rxpip-netrexx publish nxutils.rxpkg --name=nxutils --version=1.0.0 --platform=netrexx',
+    '$ tar czf cxutils.rxpkg cxutils.crexx',
+    '$ rxpip-crexx publish cxutils.rxpkg --name=cxutils --version=1.0.0 --platform=crexx',
+  ], 'Publishing NetRexx and cREXX packages');
+  D.p('In a program, name the packages in a comment on a line of its own, as for classic REXX: `/* REQUIRE nxutils */` (NetRexx) or `-- REQUIRE cxutils` (cREXX; a `/* ... */` comment works too). `rxpip run prog.nrx` or `rxpip run prog.crexx` then installs what is missing, compiles everything together and runs it. The package name may carry artifacts for several languages at once.');
   D.h2('Trying a package before you publish it');
   D.p('You can test a package without a repository: put the file in `~/.rxpip/lib/` yourself and use `rxpip run` or `rxpip build`, or write the `REQUIRE` lines and merge by hand. For a real trial, install your own test server (Chapter 7) or use a test package name on the public repository.');
   D.h2('Common errors');
@@ -255,9 +285,9 @@ module.exports = function (D) {
 
   // ------------------------------------------------------------ Chapter 5
   D.chapter('Accounts, Tokens and Owners');
-  D.p('Anyone can search, show, install and download. Publishing, and changing who owns a package, requires an account. Accounts are available **by invitation only**: every user who can publish is somebody whose code other people will run, and an open sign-up on a code repository is an easy way to distribute malware.');
+  D.p('Anyone can search, show, install and download. Publishing, and changing who owns a package, requires an account. Accounts are **approved by the repository administrator**: every user who can publish is somebody whose code other people will run, and an open sign-up on a code repository is an easy way to distribute malware.');
   D.h2('Getting an account');
-  D.p('The repository operator creates a single-use invitation code and gives it to you (Chapter 8). You redeem it once:');
+  D.p('There are two ways to get one. **Ask on the web page:** open `<repository address>?action=SIGNUP`, enter the name you want, your e-mail address and your location, and send the form. The administrator receives a mail, checks the request and approves or rejects it. On approval you receive a mail with a single-use invitation code at the address you gave. **Or** the operator creates an invitation and gives it to you directly (Chapter 8). Either way you redeem the code once:');
   D.code([
     '$ rxpip register --user=anna --invite=inv_1a2b3c4d_0123456789abcdef0123456789abcdef',
     'registered as anna; your token was saved in /home/anna/.rxpip/credentials.txt',
@@ -316,7 +346,7 @@ module.exports = function (D) {
 
   // ------------------------------------------------------------ Chapter 6
   D.chapter('The Web Interface');
-  D.p('The repository has a read-only web interface. Open the repository’s address, for example https://www.rexxpository.org/, in any web browser. It is plain HTML: it needs no JavaScript and sets no cookies.');
+  D.p('The repository has a web interface for browsing and for requesting an account. Open the repository’s address, for example https://www.rexxpository.org/, in any web browser. It is plain HTML: it needs no JavaScript and sets no cookies.');
   D.h2('What you can do in a browser');
   D.table(['Page', 'Address', 'What it shows'], [
     ['Package index', '`/` (the CGI program with no action)', 'All packages with latest version, summary and owners, and a search box'],
@@ -332,7 +362,9 @@ module.exports = function (D) {
     'registering with an invitation, logging in and managing tokens;',
     'publishing and managing owners.',
   ]);
-  D.p('There is no web form for registration, uploading or owner changes in this release; see Chapter 11. Each package page shows the exact `rxpip install` command to copy.');
+  D.p('There is no web form for uploading or owner changes in this release; see Chapter 11. Each package page shows the exact `rxpip install` command to copy.');
+  D.h2('Requesting an account');
+  D.p('When the operator has enabled it (Chapter 7), the page `?action=SIGNUP` shows a form with three fields: the name you want to log in with, your e-mail address and your location. Names follow the rules of Chapter 5. Sending the form stores a request and mails the administrator; you see a confirmation, nothing more happens until the administrator decides. The administrator opens the link in the mail, sees your data and presses **Approve** or **Reject**. Opening the link alone changes nothing. On approval an invitation code is mailed to you. A request expires after 14 days; the server keeps at most 100 pending requests and 3 per network address.');
   D.h2('Safety of the pages');
   D.p('Every value that originates from package metadata (names, summaries, authors) is escaped before it is placed in a page, and the server sends a content security policy that forbids scripts and any loading from other sites. A package author therefore cannot put active content on the repository’s pages.');
 
@@ -407,6 +439,14 @@ module.exports = function (D) {
     '# systemctl list-timers | grep certbot',
   ], 'Obtaining a certificate');
   D.p('Certbot adds the HTTPS host and redirects port 80 to it, and renews the certificate automatically.');
+  D.h2('Sign-up mail (optional)');
+  D.p('Web sign-up is off until you give the server an administrator address. Install a mail transfer agent that provides `/usr/sbin/sendmail` (`dnf install postfix`, then `systemctl enable --now postfix`), allow Apache to send mail under SELinux (`setsebool -P httpd_can_sendmail 1`), and add three lines to the virtual host:');
+  D.code([
+    'SetEnv RXPIP_ADMIN_EMAIL  you@example.org',
+    'SetEnv RXPIP_PUBLIC_URL   https://www.rexxpository.org/cgi-bin/rxpip_server.rexx',
+    'SetEnv RXPIP_MAIL_FROM    rxpip@rexxpository.org',
+  ], 'Enabling sign-up requests');
+  D.p('`RXPIP_ADMIN_EMAIL` receives the review links. `RXPIP_PUBLIC_URL` is the full address of the CGI program and is used to build those links, so that they never depend on a client-supplied host name. `RXPIP_MAIL_FROM` is the sender. Set up SPF and DKIM for the sender domain, or the mails may be filed as spam. `RXPIP_SENDMAIL` can name another command that reads a finished message on standard input.');
   D.h2('The first account');
   D.p('Create your own account on the server (the command prints the token once, so copy it):');
   D.code([
@@ -540,6 +580,13 @@ module.exports = function (D) {
     'Free-text metadata may not contain control characters. A newline in a summary could otherwise inject fake fields into a stored record.',
     'Published releases are immutable and cannot be overwritten.',
   ]);
+  D.h2('Sign-up requests');
+  D.bullets([
+    'A request changes nothing except one pending file. An account exists only after the administrator approves it, and the invitation goes to the address the applicant gave, which also shows that the applicant can read mail there.',
+    'The review link carries a random 128-bit key; the server stores only its salted hash, the link expires after 14 days, and a request can be decided once. Opening the link (an HTTP GET) shows the request; approving or rejecting is a POST, so mail scanners and link previews cannot approve anything.',
+    'Every field is validated before it is stored or mailed (name rules, a plain address syntax, no control characters), so nothing can inject extra mail headers. Field values are escaped in the pages. A hidden honeypot field, a global limit of 100 and a limit of 3 pending requests per network address slow down abuse.',
+    'The links in the mail are built from `RXPIP_PUBLIC_URL`, never from the Host header the visitor sent.',
+  ]);
   D.h2('The web pages');
   D.p('All metadata is escaped, and a content security policy forbids scripts and external resources.');
   D.h2('What RXPIP does not protect against');
@@ -553,18 +600,20 @@ module.exports = function (D) {
   // ------------------------------------------------------------ Chapter 11
   D.chapter('Restrictions and Known Problems');
   D.h2('What has been tested');
-  D.p('The server and the client, on Linux, are covered by an automated test suite of 156 checks that run against the real programs over HTTP, using a test harness that behaves like Apache (it forwards all request headers and runs the program as an ordinary user). The suite covers publishing, immutability, upload limits, archive attacks, invitations, tokens, owners, concurrent first publishes, the web pages, and the client commands.');
+  D.p('The server and the Regina client, on Linux, are covered by an automated test suite of 180 checks, and a second suite runs one scenario of about 35 checks against each of the four clients (141 checks in all, with Regina, ooRexx, NetRexx and cREXX installed). All run against the real programs over HTTP, using a test harness that behaves like Apache (it forwards all request headers and runs the program as an ordinary user). The suite covers publishing, immutability, upload limits, archive attacks, invitations, tokens, owners, concurrent first publishes, the web pages, the client commands and the moderated sign-up (with a stand-in for sendmail that stores the mails).');
   D.h2('What has not been tested');
   D.bullets([
     '**Windows.** The client and server contain Windows code paths (PowerShell for hashing and random numbers, `cmd.exe` commands for files). They were written with care but have never been run. On Windows the server cannot create a file atomically, so two simultaneous first publishes of one name, or two simultaneous uses of one invitation, are not race-safe. The installation checklist for Windows is in the repository file `DEPLOY.md`.',
     '**macOS.** Expected to work (it has `shasum` and the same shell tools) but not tried.',
     '**AlmaLinux with real Apache and SELinux.** The commands in Chapter 7 are the standard procedure but were not run on that system.',
-    '**cREXX, ooRexx and NetRexx.** Only Regina is supported.',
+    '**The other clients on Windows and macOS.** The ooRexx, NetRexx and cREXX clients and their `.bat` launchers were run on Linux only, with ooRexx 5.3, NetRexx 4 and cREXX 1.0 beta 3.',
+    '**Real mail delivery.** The sign-up mails were tested with a stand-in for sendmail; delivery through Postfix, SPF/DKIM and spam filtering are for the operator to verify.',
+    '**Bytecode.** No client builds or installs bytecode artifacts yet (cREXX `.rxbin` would be the first candidate).',
   ]);
   D.h2('Known limitations');
   D.bullets([
     '**Bytecode artifacts** are accepted and stored, and the client prefers an exact platform match, but no tool yet produces them.',
-    '**No web forms.** Registration, publishing and owner management are available only through the client.',
+    '**Few web forms.** Requesting an account is possible in the browser; publishing, owner management and token handling are available only through the client.',
     '**No removal.** There is no command to delete or withdraw a published version; the operator must remove files by hand. Releases are meant to be immutable.',
     '**No rate limiting** and no limit on the number of packages per user.',
     '**Simultaneous owner changes** to the same package, in the same instant, are resolved by the last writer.',
@@ -625,6 +674,13 @@ module.exports = function (D) {
     ['`RXPIP_INVITE`', 'client', 'Invitation code for `rxpip register`'],
     ['`RXPIP_REPO_ROOT`', 'server', 'Directory holding the repository data'],
     ['`RXPIP_MAX_UPLOAD`', 'server', 'Largest accepted upload in bytes (default 5242880)'],
+    ['`RXPIP_ADMIN_EMAIL`', 'server', 'Where sign-up review mails go; sign-up is off while unset'],
+    ['`RXPIP_PUBLIC_URL`', 'server', 'Full address of the CGI program, used in mailed links'],
+    ['`RXPIP_MAIL_FROM`', 'server', 'Sender address of the mails (default rxpip@<server name>)'],
+    ['`RXPIP_SENDMAIL`', 'server', 'Mail command (default `/usr/sbin/sendmail -t -i`)'],
+    ['`NETREXX_JAR`', 'NetRexx client', 'Path of `NetRexxC.jar`'],
+    ['`CREXX_HOME`', 'cREXX client', 'cREXX installation directory (its `bin` holds rxc, rxas, rxvm)'],
+    ['`RXPIP_INTERPRETER`', 'client', 'Interpreter started by `run`; set by the ooRexx launcher'],
   ], [2700, 1300, 5638], 'Environment variables');
   D.h2('Files');
   D.table(['File', 'Where', 'Contents'], [
@@ -634,16 +690,20 @@ module.exports = function (D) {
     ['`PACKAGE.META`', 'repo/<name>/<version>/', 'Name, version, author, summary, requirements'],
     ['`ARTIFACTS.META`', 'repo/<name>/<version>/', 'Kind, platform and files of each artifact'],
     ['`<KIND>-<PLATFORM>.rxpkg`', 'repo/<name>/<version>/artifacts/', 'The stored archive'],
-    ['`.auth/`', 'repo/', 'Users, token hashes, invitations, owner lists'],
+    ['`.auth/`', 'repo/', 'Users, token hashes, invitations, owner lists, pending sign-up requests (`requests/`)'],
   ], [3000, 3000, 3638], 'Files used by RXPIP');
 
   D.chapter('Contents of the Kit', { appendix: 'D' });
   D.table(['File', 'Purpose'], [
     ['`client/rxpip.rexx`', 'The client'],
     ['`client/rxpip.bat`', 'Windows wrapper for the client'],
+    ['`client/oorexx/`', 'ooRexx launchers (`rxpip-oorexx`, `.bat`)'],
+    ['`client/netrexx/`', 'NetRexx client `Rxpip.nrx` and launchers'],
+    ['`client/crexx/`', 'cREXX client `rxpip.crexx` and launchers'],
     ['`server/rxpip_server.rexx`', 'The server, the web interface and the administration program'],
-    ['`examples/`', 'Sample packages (`mathutils`, `strutils`, `greetutils`) and sample programs (`demo.rexx`, `echoargs.rexx`)'],
-    ['`tests/run_tests.sh`', 'The automated test suite'],
+    ['`examples/`', 'Sample packages (`mathutils`, `strutils`, `greetutils`, `nxutils`, `cxutils`) and sample programs (`demo.rexx`, `echoargs.rexx`, `hello.nrx`, `hello.crexx`)'],
+    ['`tests/run_tests.sh`', 'The automated test suite (server and Regina client)'],
+    ['`tests/run_client_matrix.sh`', 'The same scenario run against every client installed on the machine'],
     ['`tests/cgi_harness.py`', 'Test harness that behaves like Apache CGI'],
     ['`README.md`, `ARCHITECTURE.md`, `DEPLOY.md`', 'Overview, design notes, deployment notes'],
     ['`docs/`', 'This manual'],

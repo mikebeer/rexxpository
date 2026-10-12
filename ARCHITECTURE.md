@@ -401,3 +401,39 @@ exactly what to check first.
   from untrusted network data without quoting (see the `ShellQuote` fix
   in §5); package *content* itself is of course still trusted at the
   same level as any other code you choose to install and run.
+
+## 8. The four clients
+
+All clients speak the same wire protocol and print the same messages, so
+one test scenario (`tests/run_client_matrix.sh`) covers them all.
+
+| Client | Language specifics |
+|---|---|
+| Regina `client/rxpip.rexx` | The reference client. `run` merges your script and the installed `.rexx` files into one program (§3). |
+| ooRexx (same file) | Launcher `rxpip-oorexx` double-quotes every argument because ooRexx passes the command line as one string; `rxpip.rexx` splits it again (`SplitQuoted`). `run` starts the merged program through a generated runner that calls it with real separate arguments (`.routine~callWith`). Status lines are parsed with `StanzaField`, not `word()`, because ooRexx (correctly) does not treat a newline as a blank. Shares the `~/.rxpip` package store with Regina. |
+| NetRexx `client/netrexx/Rxpip.nrx` | One class; `ProcessBuilder` starts curl/tar (no shell). Installs `SOURCE/netrexx` packages (`.nrx`, one class per file). `run` compiles your program together with the installed `.nrx` classes with NetRexxC and runs it; `build` writes a jar. State in `~/.rxpip/netrexx/`. The launcher compiles `Rxpip.nrx` on first use. |
+| cREXX `client/crexx/rxpip.crexx` | Level B. Installs `SOURCE/crexx` packages (`.crexx` modules with a `namespace`). `run` compiles user program and modules with `rxc -s <dir>`, assembles with `rxas`, starts `rxvm prog mod... -a args`. Uses `ADDRESS CREXX "run :argv[]"` (argument vector, no shell). State in `~/.rxpip/crexx/`. |
+
+**Platform tags.** `SOURCE/any` is classic REXX source (Regina and ooRexx).
+NetRexx and cREXX packages are published with `--platform=netrexx` /
+`--platform=crexx`, and each client installs only artifacts matching its
+language, so a package name can carry artifacts for several languages.
+
+**Secrets** go to curl through a private header file (`-H @file`, mode 600,
+removed right after the call) in every client — never on a command line.
+
+**Not run yet:** the Windows launchers (`.bat`) and macOS for the
+NetRexx, cREXX and ooRexx clients; everything here ran on Linux.
+
+## 9. Moderated web sign-up
+
+`?action=SIGNUP` takes name, e-mail and location and stores a pending
+request (`.auth/requests/<id>.req`, secret kept as a salted hash). The
+administrator receives a mail with `?action=REVIEW&req=…&key=…`. A GET on
+that link only shows the request; approving or rejecting is a POST, so
+mail scanners that prefetch links change nothing. Approval creates a
+single-use invite and mails it to the applicant (which also proves the
+address). Limits: 100 pending requests, 3 per IP, expiry after 14 days,
+honeypot field, strict validation of every field (no control characters
+reach a mail header). Off unless `RXPIP_ADMIN_EMAIL` is set; mail is sent
+through `sendmail` (or `RXPIP_SENDMAIL`).
