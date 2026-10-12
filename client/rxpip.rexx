@@ -149,16 +149,25 @@ CmdInstall: procedure expose home cfg.
 /* recursive install with a simple "already processed" guard (space list) */
 InstallOne: procedure expose home cfg.
   parse arg spec, seen
-  parse var spec name '==' wantver
+  /* spec is "name", "name==exact" or "name>=minimum" */
+  minver = ''
+  if pos('>=', spec) > 0 then do
+    parse var spec name '>=' minver
+    wantver = ''
+  end
+  else parse var spec name '==' wantver
   name = strip(name)
   wantver = strip(wantver)
+  minver = strip(minver)
+  if minver \= '' then wantver = ''
 
   if wordpos(name, seen) > 0 then return seen  /* cycle guard */
   seen = seen name
 
   curver = InstalledVersion(home, name)
   if curver \= '' then do
-    if wantver = '' | CompareVersions(curver, wantver) >= 0 then do
+    if (wantver = '' & minver = '') | (wantver \= '' & CompareVersions(curver, wantver) >= 0) | ,
+       (minver \= '' & CompareVersions(curver, minver) >= 0) then do
       say 'rxpip: ' || name || ' ' || curver || ' already installed'
       /* still walk its dependencies -- they may have been individually
          uninstalled since, and "already installed" must not mean
@@ -172,7 +181,7 @@ InstallOne: procedure expose home cfg.
         depver  = ''
         if pos('>=', tok) > 0 then parse var tok depname '>=' depver
         depspec = depname
-        if depver \= '' then depspec = depname || '==' || depver
+        if depver \= '' then depspec = depname || '>=' || depver
         seen = InstallOne(depspec, seen)
       end
       return seen
@@ -185,6 +194,10 @@ InstallOne: procedure expose home cfg.
     return seen
   end
   ver      = StanzaField(info, 'VERSION')
+  if minver \= '' & CompareVersions(ver, minver) < 0 then do
+    say "rxpip: '" || name || "' needs version >=" || minver || ' but the repository has only' ver
+    return seen
+  end
   author   = StanzaField(info, 'AUTHOR')
   summary  = StanzaField(info, 'SUMMARY')
   requires = StanzaField(info, 'REQUIRES')
@@ -234,7 +247,7 @@ InstallOne: procedure expose home cfg.
     depver  = ''
     if pos('>=', tok) > 0 then parse var tok depname '>=' depver
     depspec = depname
-    if depver \= '' then depspec = depname || '==' || depver
+    if depver \= '' then depspec = depname || '>=' || depver
     seen = InstallOne(depspec, seen)
   end
   return seen
@@ -377,7 +390,7 @@ ScanRequires: procedure
     if pkgspec = '' then iterate
     if pos('>=', pkgspec) > 0 then do
       parse var pkgspec pn '>=' pv
-      out = out || strip(pn) || '==' || strip(pv) || ' '
+      out = out || strip(pn) || '>=' || strip(pv) || ' '
     end
     else out = out || pkgspec || ' '
   end

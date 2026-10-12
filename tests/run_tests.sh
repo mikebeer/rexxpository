@@ -368,6 +368,26 @@ ls /tmp 2>/dev/null | grep -q rxpip_hdr_ && bad "token header file removed" || o
 unset RXPIP_HOME
 
 # ============================================================================
+section "client: version requirements (>=)"
+export RXPIP_HOME=$WORK/clienthome3
+mkdir -p "$RXPIP_HOME"
+$RX config set REPO_URL "$BASE" >/dev/null 2>&1
+export RXPIP_TOKEN=$TOKA
+$RX publish "$WORK/mathutils.rxpkg" --name=vlib --version=1.0.0 >/dev/null 2>&1
+$RX publish "$WORK/mathutils.rxpkg" --name=vlib --version=1.5.0 >/dev/null 2>&1
+$RX publish "$WORK/strutils.rxpkg" --name=vapp --version=1.0.0 --requires="vlib>=1.0.0" >/dev/null 2>&1
+unset RXPIP_TOKEN
+out=$($RX install vapp 2>&1)
+expect "installing vapp pulls its dependency" "$out" "installing vlib"
+$RX list 2>&1 | grep -q '^vlib  *1\.5\.0' && ok ">=1.0.0 installs the LATEST version, not exactly 1.0.0" || bad ">=1.0.0 installs the LATEST version, not exactly 1.0.0" "$($RX list 2>&1)"
+printf '/* REQUIRE vlib>=2.0.0 */\nsay 1\n' > "$WORK/needs2.rexx"
+rm -rf "$RXPIP_HOME/pkgs" "$RXPIP_HOME/installed.txt" "$RXPIP_HOME/lib"/*
+expect "an unmet minimum is reported" "$($RX scan "$WORK/needs2.rexx" 2>&1)" "needs version >=2.0.0"
+printf '/* REQUIRE vlib>=1.2.0 */\nsay 1\n' > "$WORK/needs1.rexx"
+expect "a satisfiable minimum installs" "$($RX scan "$WORK/needs1.rexx" 2>&1)" "installing vlib 1.5.0"
+unset RXPIP_HOME
+
+# ============================================================================
 section "step 2: client accounts, tokens, owners"
 export RXPIP_HOME=$WORK/clienthome2
 mkdir -p "$RXPIP_HOME"
