@@ -56,13 +56,13 @@ function pageMap(pdf, D) {
   }
   const hdr = 'RXPIP Introduction, Installation and User';
   const first = text.findIndex(t => t.includes(hdr));          // first numbered page
-  const pages = {};
+  const pages = [];
   let from = first;
-  D.toc.forEach(e => {
+  D.toc.forEach((e, k) => {
     const norm = s => s.replace(/\s+/g, ' ').trim();
     for (let i = from; i < n; i++) {
       const lines = text[i].split('\n').map(norm);
-      if (lines.some(l => l === norm(e.text))) { pages[e.text] = i - first + 1; from = i; return; }
+      if (lines.some(l => l === norm(e.text))) { pages[k] = i - first + 1; from = i; return; }
     }
     console.error('heading not found:', e.text);
   });
@@ -72,7 +72,7 @@ function pageMap(pdf, D) {
 (async () => {
   const out = process.argv[2] || 'RXPIP-Guide.docx';
   const tmp = out.replace(/\.docx$/, '.pass1.docx');
-  let D = await build({}, tmp);
+  let D = await build([], tmp);
   const sk = process.env.SOFFICE || '/root/.claude/skills/synced/004a80ff-5a8f-4597-8d6b-9c2731b8994a_5fb75d53-748b-40b7-b60d-47cbebea1b46/docx/scripts/office/soffice.py';
   const run = f => execFileSync('python', [sk, '--headless', '--convert-to', 'pdf', f], { stdio: 'ignore' });
   run(tmp);
@@ -83,5 +83,5 @@ function pageMap(pdf, D) {
   if (JSON.stringify(pages) !== JSON.stringify(pages2)) { pages = pages2; await build(pages, tmp); }
   fs.renameSync(tmp, out);
   fs.unlinkSync(tmp.replace(/\.docx$/, '.pdf'));
-  console.log('wrote', out, Object.keys(pages).length, 'headings');
+  console.log('wrote', out, pages.length, 'headings');
 })();

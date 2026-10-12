@@ -339,7 +339,7 @@ module.exports = function (D) {
   // ------------------------------------------------------------ Chapter 7
   D.chapter('Installing the Server');
   D.p('This chapter installs the repository on AlmaLinux 9 (AlmaLinux 8 is the same) with Apache `httpd`, as used for www.rexxpository.org on a Hetzner cloud server. You need root access, a domain name pointing at the server, and Regina REXX.');
-  D.note('The commands in this chapter follow the standard procedure for AlmaLinux, but the author’s test system was not AlmaLinux: the server program is tested against an Apache-like test harness only. Expect to check the SELinux step (7.3) and the firewall step (7.5) first if something does not work.');
+  D.note('The commands in this chapter follow the standard procedure for AlmaLinux, but the author’s test system was not AlmaLinux: the server program is tested against an Apache-like test harness only. Expect to check the SELinux and Firewall sections of this chapter first if something does not work.');
   D.h2('Packages');
   D.code([
     '# dnf install -y epel-release',
@@ -457,7 +457,7 @@ module.exports = function (D) {
   ], [3600, 2600, 3438], 'Server limits');
   D.h2('Troubleshooting');
   D.table(['Symptom', 'Likely cause and what to check'], [
-    ['HTTP 500 and “Permission denied” in `/var/log/httpd/error_log`', 'SELinux label or file mode on `cgi-bin`: repeat 7.3 and check `ls -Z`'],
+    ['HTTP 500 and “Permission denied” in `/var/log/httpd/error_log`', 'SELinux label or file mode on `cgi-bin`: repeat the SELinux section of Chapter 7 and check `ls -Z`'],
     ['`PING` works, publishing reports success but nothing is stored', '`repo` is not writable by `apache` or lacks the `httpd_sys_rw_content_t` label'],
     ['`ausearch -m avc -ts recent` lists `httpd_sys_script_t` denials', 'Read the denial and fix the label; `audit2why` explains it'],
     ['“Premature end of script headers”', 'Regina not found by the CGI, or a program error. Run it by hand: `sudo -u apache env GATEWAY_INTERFACE=CGI/1.1 REQUEST_METHOD=GET QUERY_STRING=action=PING regina /var/www/rexxpository/cgi-bin/rxpip_server.rexx`'],

@@ -51,20 +51,20 @@ class Doc {
       heading: HeadingLevel.HEADING_1, pageBreakBefore: true, outlineLevel: 0,
       border: { bottom: { style: BorderStyle.SINGLE, size: 18, color: '000000', space: 6 } },
       spacing: { before: 0, after: 360 },
-      children: [new TextRun({ text, font: ARIAL, bold: true, size: 36 })],
+      children: [new TextRun({ text, font: ARIAL, bold: true, size: 36, color: '000000' })],
     }));
   }
   h2(text) {
     this.toc.push({ level: 2, text });
     this._push(new Paragraph({
       heading: HeadingLevel.HEADING_2, keepNext: true, spacing: { before: 320, after: 140 },
-      children: [new TextRun({ text, font: ARIAL, bold: true, size: 26 })],
+      children: [new TextRun({ text, font: ARIAL, bold: true, size: 26, color: '000000' })],
     }));
   }
   h3(text) {
     this._push(new Paragraph({
       heading: HeadingLevel.HEADING_3, keepNext: true, spacing: { before: 220, after: 100 },
-      children: [new TextRun({ text, font: ARIAL, bold: true, size: 22 })],
+      children: [new TextRun({ text, font: ARIAL, bold: true, size: 22, color: '000000' })],
     }));
   }
   p(text) { this._push(new Paragraph({ spacing: { after: 120 }, children: runs(text) })); }
@@ -154,8 +154,8 @@ class Doc {
 
 function tocParagraphs(entries, pages) {
   const out = [new Paragraph({ spacing: { after: 240 }, children: [new TextRun({ text: 'Contents', font: ARIAL, bold: true, size: 32 })] })];
-  entries.forEach(e => {
-    const pg = pages[e.text] != null ? String(pages[e.text]) : '0';
+  entries.forEach((e, i) => {
+    const pg = pages[i] != null ? String(pages[i]) : '0';
     const top = e.level === 1;
     out.push(new Paragraph({
       tabStops: [{ type: TabStopType.RIGHT, position: W, leader: LeaderType.DOT }],
