@@ -1,0 +1,1103 @@
+/* ---------------------------------------------------------------------
+   RXPIP  --  the REXX package manager (cREXX client, Level B)
+   ---------------------------------------------------------------------
+   Same commands, protocol and messages as the Regina client.
+
+   * Packages for cREXX are cREXX Level B source (.crexx modules with a
+     namespace) published as   SOURCE / crexx .
+   * 'run' compiles your program with rxc against the installed modules,
+     assembles everything with rxas and starts it with rxvm. 'build'
+     leaves the .rxbin files next to the output name.
+   * Local state: $RXPIP_HOME (default ~/.rxpip). config.txt,
+     credentials.txt and cache/ are shared with the other clients;
+     packages live in <home>/crexx/ (installed.txt, lib/, pkgs/).
+   * Requests use curl and archives tar, started with an argument vector
+     (no shell, so no quoting problems). Secrets travel in a private
+     header file, never on a command ln.
+   * Needs rxc, rxas and rxvm on the PATH (or CREXX_HOME/bin) for run/build.
+   --------------------------------------------------------------------- */
+options levelb
+namespace rxpip expose home lang repoUrl NL SOH lastrc
+import rxfnsb
+
+main: procedure = .int
+  arg a = .string[]
+  NL = '0A'x
+  SOH = '01'x
+  lang = 'crexx'
+  lastrc = 0
+  home = getenv('RXPIP_HOME')
+  if home = '' then do
+    h = getenv('HOME')
+    if h = '' then h = getenv('USERPROFILE')
+    home = translate(h, '/', '5C'x) || '/.rxpip'
+  end
+  call mkdirs(home || '/cache')
+  call mkdirs(home || '/' || lang || '/lib')
+  call mkdirs(home || '/' || lang || '/pkgs')
+  call loadConfig
+  if a.0 < 1 then do
+    call cmdHelp
+    return 0
+  end
+  cmd = upper(a[1])
+  rest = .string[]
+  do i = 2 to a.0
+    rest[i - 1] = a[i]
+  end
+  select
+    when cmd = 'INSTALL'   then call cmdInstall(rest)
+    when cmd = 'UNINSTALL' then call cmdUninstall(rest)
+    when cmd = 'LIST'      then call cmdList
+    when cmd = 'SEARCH'    then call cmdSearch(rest)
+    when cmd = 'SHOW'      then call cmdShow(rest)
+    when cmd = 'FREEZE'    then call cmdFreeze
+    when cmd = 'SCAN'      then call cmdScan(rest)
+    when cmd = 'RUN'       then return cmdRun(rest)
+    when cmd = 'BUILD'     then return cmdBuild(rest)
+    when cmd = 'PUBLISH'   then return cmdPublish(rest)
+    when cmd = 'CONFIG'    then call cmdConfig(rest)
+    when cmd = 'REGISTER'  then return cmdRegister(rest)
+    when cmd = 'LOGIN'     then return cmdLogin(rest)
+    when cmd = 'LOGOUT'    then call cmdLogout
+    when cmd = 'WHOAMI'    then return cmdWhoami()
+    when cmd = 'TOKEN'     then return cmdToken(rest)
+    when cmd = 'OWNER'     then return cmdOwner(rest)
+    when cmd = 'HELP'      then call cmdHelp
+    otherwise do
+      say "rxpip: unknown command '" || cmd || "' -- try 'rxpip help'"
+      return 1
+    end
+  end
+  return 0
+
+cmdHelp: procedure = .void
+  say 'RXPIP -- the REXX package manager (cREXX client)'
+  say ''
+  say 'Commands:'
+  say '  install <name>[==version]   install a package (and its deps)'
+  say '  uninstall <name>            remove an installed package'
+  say '  list                        list installed packages'
+  say '  search <term>               search the repository'
+  say '  show <name>                 show repository details for a package'
+  say '  freeze                      print installed packages as name==version'
+  say '  scan <file.crexx>           install packages named in REQUIRE comments'
+  say '  run <file.crexx> [args]     scan + auto-install, compile with the packages, run'
+  say '  build <file.crexx> [--output=name]   compile with the packages into .rxbin files'
+  say '  publish <pkgfile> --name=N --version=V [...]   upload a package (needs login)'
+  say '  register --user=U --invite=CODE   create an account (invite-only); saves your token'
+  say '  login [--token=T]           save a token (or read it from env RXPIP_TOKEN)'
+  say '  logout | whoami             forget / show the saved login'
+  say '  token new [--label=L] | list | revoke <id>   manage your API tokens'
+  say '  owner list|add|remove <pkg> [user]   manage who may publish a package'
+  say '  config get|set <key> [val]  view/change REPO_URL, LIB_DIR, INTERPRETER'
+  say '  help                        this message'
+  return
+
+/* =====================================================================
+   COMMANDS
+   ===================================================================== */
+cmdInstall: procedure = .void
+  arg a = .string[]
+  if a.0 < 1 then do
+    say 'usage: rxpip install <name>[==version]'
+    exit 1
+  end
+  seen = installOne(a[1], '')
+  return
+
+installOne: procedure = .string
+  arg spec = .string, seen = .string
+  minver = ''
+  wantver = ''
+  name = ''
+  if pos('>=', spec) > 0 then do
+    p = pos('>=', spec)
+    name = substr(spec, 1, p - 1)
+    minver = strip(substr(spec, p + 2))
+  end
+  else if pos('==', spec) > 0 then do
+    p = pos('==', spec)
+    name = substr(spec, 1, p - 1)
+    wantver = strip(substr(spec, p + 2))
+  end
+  else name = spec
+  name = strip(name)
+
+  if wordpos(name, seen) > 0 then return seen
+  seen = seen name
+
+  curver = installedVersion(name)
+  if curver \= '' then do
+    satisfied = 0
+    if wantver = '' & minver = '' then satisfied = 1
+    else if wantver \= '' then do
+      if compareVersions(curver, wantver) >= 0 then satisfied = 1
+    end
+    else if compareVersions(curver, minver) >= 0 then satisfied = 1
+    if satisfied then do
+      say 'rxpip: ' || name curver 'already installed'
+      rec = findRecord(name)
+      reqs = translate(stanzaField(rec, 'REQUIRES'), ' ', ',')
+      do i = 1 to words(reqs)
+        seen = installOne(depSpec(word(reqs, i)), seen)
+      end
+      return seen
+    end
+  end
+
+  info = serverGet('INFO', 'name=' || urlEnc(name) || withVer(wantver))
+  if stanzaField(info, 'STATUS') \= 'OK' then do
+    say "rxpip: cannot resolve '" || name || "':" infoMessage(info)
+    return seen
+  end
+  ver = stanzaField(info, 'VERSION')
+  if minver \= '' then do
+    if compareVersions(ver, minver) < 0 then do
+      say "rxpip: '" || name || "' needs version >=" || minver 'but the repository has only' ver
+      return seen
+    end
+  end
+  author = stanzaField(info, 'AUTHOR')
+  summary = stanzaField(info, 'SUMMARY')
+  requires = stanzaField(info, 'REQUIRES')
+
+  artresp = serverGet('ARTIFACTS', 'name=' || urlEnc(name) || '&version=' || urlEnc(ver))
+  chosen = selectBestArtifact(artresp)
+  if chosen = '' then do
+    say "rxpip: no compatible artifact for '" || name || "'" ver '(need SOURCE/' || lang || ')'
+    return seen
+  end
+  p1 = pos(SOH, chosen)
+  kind = substr(chosen, 1, p1 - 1)
+  restc = substr(chosen, p1 + 1)
+  p2 = pos(SOH, restc)
+  platform = substr(restc, 1, p2 - 1)
+  files = substr(restc, p2 + 1)
+  say 'rxpip: installing' name ver || '(' || kind || '/' || platform || ') ...'
+
+  cachefile = home || '/cache/' || name || '-' || ver || '-' || kind || '-' || platform || '.rxpkg'
+  if serverDownload(name, ver, kind, platform, cachefile) \= 0 then do
+    say 'rxpip: download failed for' name ver
+    return seen
+  end
+  pkgdir = home || '/' || lang || '/pkgs/' || name || '/' || ver
+  call rmtree(pkgdir)
+  call mkdirs(pkgdir)
+  argv = .string[]
+  argv[1] = 'tar'
+  argv[2] = 'xzf'
+  argv[3] = cachefile
+  argv[4] = '-C'
+  argv[5] = pkgdir
+  tmp = exec(argv)
+  do i = 1 to words(files)
+    fn = word(files, i)
+    call copyFile(pkgdir || '/' || fn, home || '/' || lang || '/lib/' || fn)
+  end
+  call recordInstalled(name, ver, author, summary, requires, files)
+
+  reqs = translate(requires, ' ', ',')
+  do i = 1 to words(reqs)
+    seen = installOne(depSpec(word(reqs, i)), seen)
+  end
+  return seen
+
+depSpec: procedure = .string
+  arg tok = .string
+  p = pos('>=', tok)
+  if p > 0 then do
+    dv = substr(tok, p + 2)
+    if dv \= '' then return tok
+    return substr(tok, 1, p - 1)
+  end
+  return tok
+
+cmdUninstall: procedure = .void
+  arg a = .string[]
+  if a.0 < 1 then do
+    say 'usage: rxpip uninstall <name>'
+    exit 1
+  end
+  name = strip(a[1])
+  rec = findRecord(name)
+  if rec = '' then do
+    say "rxpip: '" || name || "' is not installed"
+    exit 1
+  end
+  files = stanzaField(rec, 'FILES')
+  do i = 1 to words(files)
+    call rmfile(home || '/' || lang || '/lib/' || word(files, i))
+  end
+  call rmtree(home || '/' || lang || '/pkgs/' || name)
+  call removeRecord(name)
+  say 'rxpip: removed' name
+  return
+
+cmdList: procedure = .void
+  recs = records()
+  if recs.0 = 0 then do
+    say '(no packages installed)'
+    return
+  end
+  say left('NAME', 20) left('VERSION', 12) 'SUMMARY'
+  say copies('-', 60)
+  do i = 1 to recs.0
+    say left(stanzaField(recs[i], 'NAME'), 20) left(stanzaField(recs[i], 'VERSION'), 12) stanzaField(recs[i], 'SUMMARY')
+  end
+  return
+
+cmdFreeze: procedure = .void
+  recs = records()
+  do i = 1 to recs.0
+    say stanzaField(recs[i], 'NAME') || '==' || stanzaField(recs[i], 'VERSION')
+  end
+  return
+
+cmdSearch: procedure = .void
+  arg a = .string[]
+  term = ''
+  do i = 1 to a.0
+    term = term a[i]
+  end
+  term = strip(term)
+  call printStanzas(serverGet('SEARCH', 'q=' || urlEnc(term)))
+  return
+
+cmdShow: procedure = .void
+  arg a = .string[]
+  if a.0 < 1 then do
+    say 'usage: rxpip show <name>'
+    exit 1
+  end
+  resp = serverGet('INFO', 'name=' || urlEnc(a[1]))
+  if stanzaField(resp, 'STATUS') \= 'OK' then do
+    say 'rxpip:' infoMessage(resp)
+    exit 1
+  end
+  call printStanzas(resp)
+  return
+
+cmdScan: procedure = .void
+  arg a = .string[]
+  if a.0 < 1 then do
+    say "rxpip: file not found: ''"
+    exit 1
+  end
+  if \fileExists(a[1]) then do
+    say "rxpip: file not found: '" || a[1] || "'"
+    exit 1
+  end
+  reqs = scanRequires(a[1])
+  if reqs = '' then do
+    say 'rxpip: no REQUIRE directives found in' a[1]
+    return
+  end
+  seen = ''
+  do i = 1 to words(reqs)
+    seen = installOne(word(reqs, i), seen)
+  end
+  return
+
+/* REQUIRE directives: a comment ln  /* REQUIRE name[>=ver] */  or  -- REQUIRE name[>=ver] */
+scanRequires: procedure = .string
+  arg fn = .string
+  out = ''
+  txt = loadtext(fn, NL)
+  do while txt \= ''
+    ln = ''
+    p = pos(NL, txt)
+    if p = 0 then do
+      ln = txt
+      txt = ''
+    end
+    else do
+      ln = substr(txt, 1, p - 1)
+      txt = substr(txt, p + 1)
+    end
+    l = strip(ln)
+    body = ''
+    if left(l, 2) = '/*' then do
+      body = substr(l, 3)
+      q = pos('*/', body)
+      if q > 0 then body = left(body, q - 1)
+    end
+    else if left(l, 2) = '--' then body = substr(l, 3)
+    else iterate
+    body = strip(body)
+    if upper(left(body, 7)) \= 'REQUIRE' then iterate
+    spec = strip(substr(body, 8))
+    if spec = '' then iterate
+    out = out spec
+  end
+  return strip(out)
+
+/* locate rxc / rxas / rxvm: CREXX_HOME/bin first, then the PATH */
+tool: procedure = .string
+  arg nm = .string
+  ch = getenv('CREXX_HOME')
+  if ch \= '' then do
+    if fileExists(ch || '/bin/' || nm) then return ch || '/bin/' || nm
+  end
+  return nm
+
+/* compile the user's program + installed modules; returns the list of rxbin
+   base names (user's program first), '' on failure */
+compileAll: procedure = .string
+  arg src = .string, outdir = .string
+  call mkdirs(outdir)
+  libdir = home || '/' || lang || '/lib'
+  mods = ''
+  names = listDir(libdir)
+  do i = 1 to names.0
+    n = names[i]
+    if right(n, 6) = '.crexx' then do
+      base = left(n, length(n) - 6)
+      call copyFile(libdir || '/' || n, outdir || '/' || n)
+      mods = mods base
+    end
+  end
+  cls = baseName(src)
+  cls = left(cls, length(cls) - 6)
+  call copyFile(src, outdir || '/' || baseName(src))
+  all = cls mods
+  do i = 1 to words(all)
+    m = word(all, i)
+    argv = .string[]
+    argv[1] = tool('rxc')
+    argv[2] = '-s'
+    argv[3] = outdir
+    argv[4] = '-o'
+    argv[5] = outdir || '/' || m
+    argv[6] = outdir || '/' || m || '.crexx'
+    msg = exec(argv)
+    if lastrc \= 0 then do
+      say msg
+      return ''
+    end
+    argv2 = .string[]
+    argv2[1] = tool('rxas')
+    argv2[2] = outdir || '/' || m
+    msg = exec(argv2)
+    if lastrc \= 0 then do
+      say msg
+      return ''
+    end
+  end
+  return all
+
+cmdRun: procedure = .int
+  arg a = .string[]
+  if a.0 < 1 then do
+    say "rxpip: file not found: ''"
+    return 1
+  end
+  if \fileExists(a[1]) then do
+    say "rxpip: file not found: '" || a[1] || "'"
+    return 1
+  end
+  src = a[1]
+  seen = ''
+  reqs = scanRequires(src)
+  do i = 1 to words(reqs)
+    seen = installOne(word(reqs, i), seen)
+  end
+  tmp = home || '/run_' || pid()
+  all = compileAll(src, tmp)
+  if all = '' then do
+    say 'rxpip: compilation failed'
+    call rmtree(tmp)
+    return 1
+  end
+  argv = .string[]
+  argv[1] = tool('rxvm')
+  do i = 1 to words(all)
+    argv[i + 1] = tmp || '/' || word(all, i)
+  end
+  n = words(all) + 1
+  if a.0 > 1 then do
+    n = n + 1
+    argv[n] = '-a'
+    do i = 2 to a.0
+      n = n + 1
+      argv[n] = a[i]
+    end
+  end
+  out = exec(argv)
+  if out \= '' then call charout , out
+  rcv = lastrc
+  call rmtree(tmp)
+  return rcv
+
+cmdBuild: procedure = .int
+  arg a = .string[]
+  if a.0 < 1 then do
+    say 'usage: rxpip build <file.crexx> [--output=name]'
+    return 1
+  end
+  if \fileExists(a[1]) then do
+    say 'usage: rxpip build <file.crexx> [--output=name]'
+    return 1
+  end
+  src = a[1]
+  cls = baseName(src)
+  cls = left(cls, length(cls) - 6)
+  out = opt(a, 'output')
+  if out = '' then out = 'build_' || cls
+  seen = ''
+  reqs = scanRequires(src)
+  do i = 1 to words(reqs)
+    seen = installOne(word(reqs, i), seen)
+  end
+  call mkdirs(out)
+  all = compileAll(src, out)
+  if all = '' then do
+    say 'rxpip: compilation failed'
+    return 1
+  end
+  say 'rxpip: wrote' out '(run: rxvm' || ' ' || out || '/' || cls || ' ' || out || '/<module>... )'
+  return 0
+
+/* ---- accounts, tokens, owners ---- */
+cmdPublish: procedure = .int
+  arg a = .string[]
+  if a.0 < 1 then do
+    say 'usage: rxpip publish <file.rxpkg> --name=X --version=Y [--token=T] [--author=A --summary=S --requires=R --kind=SOURCE|BYTECODE --platform=TAG]'
+    return 1
+  end
+  if \fileExists(a[1]) then do
+    say 'usage: rxpip publish <file.rxpkg> --name=X --version=Y [--token=T] [--author=A --summary=S --requires=R --kind=SOURCE|BYTECODE --platform=TAG]'
+    return 1
+  end
+  pkgfile = a[1]
+  name = opt(a, 'name')
+  ver = opt(a, 'version')
+  kind = opt(a, 'kind')
+  if kind = '' then kind = 'SOURCE'
+  platform = opt(a, 'platform')
+  if platform = '' then platform = lang
+  token = resolveToken(a)
+  if name = '' | ver = '' | token = '' then do
+    say 'rxpip: --name, --version and a login are required (rxpip login, or --token=T, or env RXPIP_TOKEN)'
+    return 1
+  end
+  if \tokenLooksValid(token) then do
+    say 'rxpip: token must be 16-128 characters from A-Z a-z 0-9 . _ ~ -'
+    return 1
+  end
+  hdrs = .string[]
+  hdrs[1] = 'X-Rxpip-Name: ' || name
+  hdrs[2] = 'X-Rxpip-Version: ' || ver
+  hdrs[3] = 'X-Rxpip-Author: ' || opt(a, 'author')
+  hdrs[4] = 'X-Rxpip-Summary: ' || opt(a, 'summary')
+  hdrs[5] = 'X-Rxpip-Requires: ' || opt(a, 'requires')
+  hdrs[6] = 'X-Rxpip-Kind: ' || kind
+  hdrs[7] = 'X-Rxpip-Platform: ' || platform
+  sec = .string[]
+  sec[1] = 'X-Rxpip-Token: ' || token
+  return showResponse(serverPost('PUBLISH', '', hdrs, sec, pkgfile))
+
+cmdRegister: procedure = .int
+  arg a = .string[]
+  user = opt(a, 'user')
+  inv = opt(a, 'invite')
+  if inv = '' then inv = getenv('RXPIP_INVITE')
+  if user = '' | inv = '' then do
+    say 'usage: rxpip register --user=<name> --invite=<code>   (invite from the repository admin)'
+    return 1
+  end
+  hdrs = .string[]
+  hdrs[1] = 'X-Rxpip-User: ' || user
+  sec = .string[]
+  sec[1] = 'X-Rxpip-Invite: ' || inv
+  out = serverPost('REGISTER', '', hdrs, sec, '')
+  if stanzaField(out, 'STATUS') \= 'OK' then do
+    call showResponse(out)
+    return 1
+  end
+  call saveCredential(user, stanzaField(out, 'TOKEN'))
+  say 'registered as ' || user || '; your token was saved in ' || home || '/credentials.txt'
+  say 'Treat that file like a password. You can now: rxpip publish ...'
+  return 0
+
+cmdLogin: procedure = .int
+  arg a = .string[]
+  t = opt(a, 'token')
+  if t = '' then t = getenv('RXPIP_TOKEN')
+  if t = '' then do
+    say 'usage: rxpip login --token=<token>   (or set env RXPIP_TOKEN)'
+    return 1
+  end
+  if \tokenLooksValid(t) then do
+    say 'usage: rxpip login --token=<token>   (or set env RXPIP_TOKEN)'
+    return 1
+  end
+  sec = .string[]
+  sec[1] = 'X-Rxpip-Token: ' || t
+  noh = .string[]
+  out = serverPost('WHOAMI', '', noh, sec, '')
+  if stanzaField(out, 'STATUS') \= 'OK' then do
+    call showResponse(out)
+    return 1
+  end
+  u = stanzaField(out, 'USER')
+  call saveCredential(u, t)
+  say 'logged in as' u
+  return 0
+
+cmdLogout: procedure = .void
+  call removeCredential
+  say 'logged out of' repoUrl
+  return
+
+authCall: procedure = .string
+  arg action = .string, hdrs = .string[]
+  empty = .string[]
+  t = resolveToken(empty)
+  if t = '' then do
+    say 'not logged in (rxpip login --token=T)'
+    exit 1
+  end
+  sec = .string[]
+  sec[1] = 'X-Rxpip-Token: ' || t
+  return serverPost(action, '', hdrs, sec, '')
+
+cmdWhoami: procedure = .int
+  empty = .string[]
+  t = resolveToken(empty)
+  if t = '' then do
+    say 'not logged in'
+    return 1
+  end
+  noh = .string[]
+  return showResponse(authCall('WHOAMI', noh))
+
+cmdToken: procedure = .int
+  arg a = .string[]
+  sub = ''
+  if a.0 > 0 then sub = upper(a[1])
+  hdrs = .string[]
+  select
+    when sub = 'NEW' then do
+      lbl = opt(a, 'label')
+      if lbl \= '' then hdrs[1] = 'X-Rxpip-Label: ' || lbl
+      return showResponse(authCall('NEWTOKEN', hdrs))
+    end
+    when sub = 'LIST' then return showResponse(authCall('TOKENS', hdrs))
+    when sub = 'REVOKE' then do
+      if a.0 < 2 then do
+        say 'usage: rxpip token revoke <token-id>   (see: rxpip token list)'
+        return 1
+      end
+      hdrs[1] = 'X-Rxpip-Token-Id: ' || a[2]
+      return showResponse(authCall('REVOKE', hdrs))
+    end
+    otherwise do
+      say 'usage: rxpip token new [--label=L] | list | revoke <id>'
+      return 1
+    end
+  end
+  return 1
+
+cmdOwner: procedure = .int
+  arg a = .string[]
+  sub = ''
+  pkg = ''
+  who = ''
+  if a.0 > 0 then sub = upper(a[1])
+  if a.0 > 1 then pkg = a[2]
+  if a.0 > 2 then who = a[3]
+  bad = 0
+  if pkg = '' then bad = 1
+  if sub \= 'LIST' & sub \= 'ADD' & sub \= 'REMOVE' then bad = 1
+  if sub \= 'LIST' & who = '' then bad = 1
+  if bad then do
+    say 'usage: rxpip owner list <pkg> | add <pkg> <user> | remove <pkg> <user>'
+    return 1
+  end
+  if sub = 'LIST' then return showResponse(serverGet('OWNERS', 'name=' || urlEnc(pkg)))
+  hdrs = .string[]
+  hdrs[1] = 'X-Rxpip-Name: ' || pkg
+  hdrs[2] = 'X-Rxpip-User: ' || who
+  return showResponse(authCall(sub || 'OWNER', hdrs))
+
+cmdConfig: procedure = .void
+  arg a = .string[]
+  sub = ''
+  if a.0 > 0 then sub = upper(a[1])
+  if sub = 'GET' & a.0 > 1 then do
+    say a[2] || ':' getConfig(a[2])
+  end
+  else if sub = 'SET' & a.0 > 2 then do
+    call setConfig(a[2], a[3])
+    say 'rxpip: set' a[2] '=' a[3]
+  end
+  else do
+    say 'REPO_URL:' getConfig('REPO_URL')
+    say 'LIB_DIR:' getConfig('LIB_DIR')
+    say 'INTERPRETER:' getConfig('INTERPRETER')
+  end
+  return
+
+/* =====================================================================
+   CONFIG AND CREDENTIALS
+   ===================================================================== */
+loadConfig: procedure = .void
+  cf = home || '/config.txt'
+  if \fileExists(cf) then do
+    call writeText(cf, 'REPO_URL: https://www.rexxpository.org/cgi-bin/rxpip_server.rexx' || NL || 'LIB_DIR: ' || home || '/lib' || NL || 'INTERPRETER: regina' || NL)
+  end
+  repoUrl = getConfig('REPO_URL')
+  return
+
+getConfig: procedure = .string
+  arg key = .string
+  cf = home || '/config.txt'
+  val = ''
+  if fileExists(cf) then do
+    lines = readlines(cf)
+    do i = 1 to lines.0
+      p = pos(':', lines[i])
+      if p > 0 then do
+        if upper(strip(substr(lines[i], 1, p - 1))) = upper(key) then val = strip(substr(lines[i], p + 1))
+      end
+    end
+  end
+  return val
+
+setConfig: procedure = .void
+  arg key = .string, val = .string
+  cf = home || '/config.txt'
+  key = upper(key)
+  out = ''
+  done = 0
+  if fileExists(cf) then do
+    lines = readlines(cf)
+    do i = 1 to lines.0
+      if strip(lines[i]) = '' then iterate
+      p = pos(':', lines[i])
+      k = ''
+      if p > 0 then k = upper(strip(substr(lines[i], 1, p - 1)))
+      if k = key then do
+        out = out || key || ': ' || val || NL
+        done = 1
+      end
+      else out = out || lines[i] || NL
+    end
+  end
+  if \done then out = out || key || ': ' || val || NL
+  call writeText(cf, out)
+  repoUrl = getConfig('REPO_URL')
+  return
+
+/* credentials.txt: one ln per repository:  <repo_url> <user> <token>  */
+getCredential: procedure = .string
+  f = home || '/credentials.txt'
+  res = ''
+  if fileExists(f) then do
+    lines = readlines(f)
+    do i = 1 to lines.0
+      if word(lines[i], 1) = repoUrl then res = word(lines[i], 2) || SOH || word(lines[i], 3)
+    end
+  end
+  return res
+
+credentialLines: procedure = .string
+  f = home || '/credentials.txt'
+  keep = ''
+  if fileExists(f) then do
+    lines = readlines(f)
+    do i = 1 to lines.0
+      if strip(lines[i]) \= '' & word(lines[i], 1) \= repoUrl then keep = keep || lines[i] || NL
+    end
+  end
+  return keep
+
+saveCredential: procedure = .void
+  arg user = .string, token = .string
+  call writePrivate(home || '/credentials.txt', credentialLines() || repoUrl user token || NL)
+  return
+
+removeCredential: procedure = .void
+  keep = credentialLines()
+  f = home || '/credentials.txt'
+  if keep = '' then call rmfile(f)
+  else call writePrivate(f, keep)
+  return
+
+resolveToken: procedure = .string
+  arg a = .string[]
+  t = opt(a, 'token')
+  if t = '' then t = getenv('RXPIP_TOKEN')
+  if t = '' then do
+    c = getCredential()
+    p = pos(SOH, c)
+    if p > 0 then t = substr(c, p + 1)
+  end
+  return t
+
+tokenLooksValid: procedure = .int
+  arg t = .string
+  if length(t) < 16 | length(t) > 128 then return 0
+  if verify(t, 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~-') = 0 then return 1
+  return 0
+
+/* =====================================================================
+   HTTP (curl)
+   ===================================================================== */
+serverGet: procedure = .string
+  arg action = .string, extra = .string
+  url = repoUrl || '?action=' || action
+  if extra \= '' then url = url || '&' || extra
+  argv = .string[]
+  argv[1] = 'curl'
+  argv[2] = '-s'
+  argv[3] = url
+  return exec(argv)
+
+serverDownload: procedure = .int
+  arg name = .string, ver = .string, kind = .string, platform = .string, outfile = .string
+  url = repoUrl || '?action=DOWNLOAD&name=' || urlEnc(name)
+  if ver \= '' then url = url || '&version=' || urlEnc(ver)
+  url = url || '&kind=' || urlEnc(kind) || '&platform=' || urlEnc(platform)
+  argv = .string[]
+  argv[1] = 'curl'
+  argv[2] = '-s'
+  argv[3] = '-f'
+  argv[4] = '-o'
+  argv[5] = outfile
+  argv[6] = url
+  tmp = exec(argv)
+  return lastrc
+
+/* POST. hdrs: ordinary "Name: value" headers; secrets: header lines that
+   must not appear in the URL or on a command ln, so they go to curl
+   through a private temporary file (curl -H @file). bodyfile may be ''. */
+serverPost: procedure = .string
+  arg action = .string, extra = .string, hdrs = .string[], secrets = .string[], bodyfile = .string
+  url = repoUrl || '?action=' || action
+  if extra \= '' then url = url || '&' || extra
+  hf = home || '/hdr_' || pid() || '.tmp'
+  content = ''
+  do i = 1 to secrets.0
+    content = content || secrets[i] || NL
+  end
+  content = content || NL
+  call writePrivate(hf, content)
+  argv = .string[]
+  n = 0
+  n = n + 1; argv[n] = 'curl'
+  n = n + 1; argv[n] = '-s'
+  n = n + 1; argv[n] = '-X'
+  n = n + 1; argv[n] = 'POST'
+  n = n + 1; argv[n] = '-H'
+  n = n + 1; argv[n] = '@' || hf
+  do i = 1 to hdrs.0
+    n = n + 1; argv[n] = '-H'
+    n = n + 1; argv[n] = hdrs[i]
+  end
+  if bodyfile \= '' then do
+    n = n + 1; argv[n] = '--data-binary'
+    n = n + 1; argv[n] = '@' || bodyfile
+  end
+  else do
+    n = n + 1; argv[n] = '-d'
+    n = n + 1; argv[n] = ''
+  end
+  n = n + 1; argv[n] = url
+  out = exec(argv)
+  call rmfile(hf)
+  return out
+
+showResponse: procedure = .int
+  arg out = .string
+  say out
+  if out = '' then do
+    say 'rxpip: no response from server'
+    return 1
+  end
+  if word(out, 1) = 'STATUS:' & word(out, 2) = 'OK' then return 0
+  return 1
+
+/* =====================================================================
+   STANZAS, VERSIONS, ARTIFACTS
+   ===================================================================== */
+nextLine: procedure = .string
+  arg expose txt = .string
+  ln = ''
+  p = pos(NL, txt)
+  if p = 0 then do
+    ln = txt
+    txt = ''
+  end
+  else do
+    ln = substr(txt, 1, p - 1)
+    txt = substr(txt, p + 1)
+  end
+  return ln
+
+stanzaField: procedure = .string
+  arg resp = .string, key = .string
+  tag = key || ':'
+  txt = resp
+  do while txt \= ''
+    ln = nextLine(txt)
+    if left(ln, length(tag)) = tag then return strip(substr(ln, length(tag) + 1))
+  end
+  return ''
+
+printStanzas: procedure = .void
+  arg resp = .string
+  txt = resp
+  do while txt \= ''
+    ln = nextLine(txt)
+    if ln = 'STATUS: OK' then iterate
+    if left(ln, 6) = 'COUNT:' then iterate
+    say ln
+  end
+  return
+
+infoMessage: procedure = .string
+  arg resp = .string
+  m = stanzaField(resp, 'MESSAGE')
+  if m = '' then m = 'no response from server'
+  return m
+
+withVer: procedure = .string
+  arg v = .string
+  if v = '' then return ''
+  return '&version=' || urlEnc(v)
+
+compareVersions: procedure = .int
+  arg a = .string, b = .string
+  aa = translate(a, ' ', '.')
+  bb = translate(b, ' ', '.')
+  n = words(aa)
+  if words(bb) > n then n = words(bb)
+  do i = 1 to n
+    x = 0
+    y = 0
+    if i <= words(aa) then x = word(aa, i) + 0
+    if i <= words(bb) then y = word(bb, i) + 0
+    if x < y then return -1
+    if x > y then return 1
+  end
+  return 0
+
+/* the artifact to install: SOURCE/<lang> (this client's language) */
+selectBestArtifact: procedure = .string
+  arg resp = .string
+  best = ''
+  curK = ''
+  curP = ''
+  txt = resp
+  do while txt \= ''
+    ln = nextLine(txt)
+    if left(ln, 5) = 'KIND:' then curK = strip(substr(ln, 6))
+    else if left(ln, 9) = 'PLATFORM:' then curP = strip(substr(ln, 10))
+    else if left(ln, 6) = 'FILES:' then do
+      f = strip(substr(ln, 7))
+      if upper(curK) = 'SOURCE' & lower(curP) = lang then best = curK || SOH || curP || SOH || f
+      curK = ''
+      curP = ''
+    end
+  end
+  return best
+
+urlEnc: procedure = .string
+  arg s = .string
+  out = ''
+  do i = 1 to length(s)
+    c = substr(s, i, 1)
+    if verify(c, 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.~-') = 0 then out = out || c
+    else out = out || '%' || c2x(c)
+  end
+  return out
+
+opt: procedure = .string
+  arg a = .string[], key = .string
+  needle = '--' || key || '='
+  do i = 1 to a.0
+    if left(a[i], length(needle)) = needle then return substr(a[i], length(needle) + 1)
+  end
+  return ''
+
+/* =====================================================================
+   INSTALLED-PACKAGE DATABASE  (<home>/crexx/installed.txt, same record
+   format as the other clients: NAME/VERSION/AUTHOR/SUMMARY/REQUIRES/FILES)
+   ===================================================================== */
+records: procedure = .string[]
+  res = .string[]
+  idx = home || '/' || lang || '/installed.txt'
+  if \fileExists(idx) then return res
+  lines = readlines(idx)
+  cur = ''
+  n = 0
+  do i = 1 to lines.0
+    if lines[i] = '' then do
+      if cur \= '' then do
+        n = n + 1
+        res[n] = cur
+      end
+      cur = ''
+    end
+    else cur = cur || lines[i] || NL
+  end
+  if cur \= '' then do
+    n = n + 1
+    res[n] = cur
+  end
+  return res
+
+findRecord: procedure = .string
+  arg name = .string
+  recs = records()
+  do i = 1 to recs.0
+    if stanzaField(recs[i], 'NAME') = name then return recs[i]
+  end
+  return ''
+
+installedVersion: procedure = .string
+  arg name = .string
+  rec = findRecord(name)
+  if rec = '' then return ''
+  return stanzaField(rec, 'VERSION')
+
+removeRecord: procedure = .void
+  arg name = .string
+  recs = records()
+  out = ''
+  do i = 1 to recs.0
+    if stanzaField(recs[i], 'NAME') \= name then out = out || recs[i] || NL
+  end
+  call writeText(home || '/' || lang || '/installed.txt', out)
+  return
+
+recordInstalled: procedure = .void
+  arg name = .string, ver = .string, author = .string, summary = .string, requires = .string, files = .string
+  call removeRecord(name)
+  idx = home || '/' || lang || '/installed.txt'
+  cur = ''
+  if fileExists(idx) then cur = loadtext(idx, NL)
+  cur = cur || 'NAME: ' || name || NL || 'VERSION: ' || ver || NL || 'AUTHOR: ' || author || NL || 'SUMMARY: ' || summary || NL || 'REQUIRES: ' || requires || NL || 'FILES: ' || files || NL || NL
+  call writeText(idx, cur)
+  return
+
+/* =====================================================================
+   SYSTEM LAYER  (files and processes)
+   ===================================================================== */
+/* run a program with an argument vector; returns stdout (+stderr) as text,
+   sets lastrc */
+exec: procedure = .string
+  arg argv = .string[]
+  out = .string[]
+  err = .string[]
+  address crexx "run :argv[]" output out error err
+  lastrc = rc
+  res = ''
+  do i = 1 to out.0
+    res = res || out[i] || NL
+  end
+  do i = 1 to err.0
+    res = res || err[i] || NL
+  end
+  return res
+
+pid: procedure = .string
+  out = .string[]
+  address crexx "pid" output out
+  if out.0 > 0 then return strip(out[1])
+  return '0'
+
+fileExists: procedure = .int
+  arg f = .string
+  ao = .string[]
+  ae = .string[]
+  address crexx "exists :f" output ao error ae
+  if rc = 0 then return 1
+  return 0
+
+mkdirs: procedure = .void
+  arg d = .string
+  ao = .string[]
+  ae = .string[]
+  address crexx "mkdir -p :d" output ao error ae
+  return
+
+rmfile: procedure = .void
+  arg f = .string
+  ao = .string[]
+  ae = .string[]
+  address crexx "rm :f" output ao error ae
+  return
+
+rmtree: procedure = .void
+  arg d = .string
+  if fileExists(d) then do
+    ao = .string[]
+    ae = .string[]
+    address crexx "rm -r :d" output ao error ae
+  end
+  return
+
+copyFile: procedure = .void
+  arg src = .string, dst = .string
+  ao = .string[]
+  ae = .string[]
+  address crexx "cp :src :dst" output ao error ae
+  return
+
+baseName: procedure = .string
+  arg p = .string
+  q = lastpos('/', p)
+  if q = 0 then return p
+  return substr(p, q + 1)
+
+listDir: procedure = .string[]
+  arg d = .string
+  out = .string[]
+  address crexx "ls :d" output out
+  return out
+
+/* write a text file (replaces it) */
+writeText: procedure = .void
+  arg f = .string, content = .string
+  tmp = f || '.new'
+  call rmfile(tmp)
+  ao = .string[]
+  ae = .string[]
+  address crexx "touch :tmp" output ao error ae
+  txt = content
+  wrote = 0
+  do while txt \= ''
+    ln = nextLine(txt)
+    call lineout tmp, ln
+    wrote = 1
+  end
+  if wrote then call lineout tmp
+  address crexx "mv :tmp :f" output ao error ae
+  return
+
+/* write a file only the owner can read (mode 600 on Unix) */
+writePrivate: procedure = .void
+  arg f = .string, content = .string
+  tmp = f || '.new'
+  call rmfile(tmp)
+  ao = .string[]
+  ae = .string[]
+  address crexx "touch :tmp" output ao error ae
+  argv = .string[]
+  argv[1] = 'chmod'
+  argv[2] = '600'
+  argv[3] = tmp
+  x = exec(argv)
+  txt = content
+  wrote = 0
+  do while txt \= ''
+    ln = nextLine(txt)
+    call lineout tmp, ln
+    wrote = 1
+  end
+  if wrote then call lineout tmp
+  address crexx "mv :tmp :f" output ao error ae
+  return

@@ -1,0 +1,7 @@
+/* REQUIRE cxutils */
+options levelb
+import rxfnsb
+import cxutils
+arg a = .string[]
+say shout("hello crexx") twice(21) a.0
+return 0

@@ -1,0 +1,15 @@
+#!/bin/sh
+# RXPIP cREXX client launcher. Needs rxc, rxas and rxvm (cREXX 1.0 beta 3 or newer)
+# on the PATH, or CREXX_HOME pointing at the install directory (with bin/).
+# The client is compiled on first use (and again when rxpip.crexx changes).
+D=$(cd "$(dirname "$0")" && pwd)
+[ -n "$CREXX_HOME" ] && PATH="$CREXX_HOME/bin:$PATH"
+command -v rxc >/dev/null 2>&1 || { echo "rxpip-crexx: rxc not found (put cREXX on PATH or set CREXX_HOME)" >&2; exit 1; }
+HOME_DIR=${RXPIP_HOME:-$HOME/.rxpip}
+OUT=$HOME_DIR/crexx/bin
+BIN=$OUT/rxpip.rxbin
+if [ ! -f "$BIN" ] || [ "$D/rxpip.crexx" -nt "$BIN" ]; then
+  mkdir -p "$OUT" || exit 1
+  ( rxc -o "$OUT/rxpip" "$D/rxpip.crexx" >/dev/null && rxas "$OUT/rxpip" ) || { echo "rxpip-crexx: could not compile rxpip.crexx" >&2; exit 1; }
+fi
+exec rxvm "$BIN" -a "$@"
