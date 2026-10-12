@@ -1,7 +1,17 @@
 #!/bin/sh
 # RXPIP NetRexx client launcher. Needs Java and NetRexxC.jar (NetRexx 3.x/4.x).
-# Set NETREXX_JAR if the jar is not next to this script.
+# Set NETREXX_JAR if the jar is not next to this script. The client is
+# compiled on first use (and again when Rxpip.nrx changes).
 D=$(cd "$(dirname "$0")" && pwd)
 JAR=${NETREXX_JAR:-$D/NetRexxC.jar}
 [ -f "$JAR" ] || { echo "rxpip-netrexx: NetRexxC.jar not found (set NETREXX_JAR)" >&2; exit 1; }
-exec java -cp "$D:$JAR" Rxpip "$@"
+OUT=${RXPIP_HOME:-$HOME/.rxpip}/netrexx/bin
+if [ ! -f "$OUT/Rxpip.class" ] || [ "$D/Rxpip.nrx" -nt "$OUT/Rxpip.class" ]; then
+  mkdir -p "$OUT" || exit 1
+  cp "$D/Rxpip.nrx" "$OUT/" || exit 1
+  rm -f "$OUT/Rxpip.class"
+  # NetRexxC exits non-zero even for warnings, so success = the class file exists
+  ( cd "$OUT" && java -cp "$JAR" COM.ibm.netrexx.process.NetRexxC Rxpip -nologo -nocrossref -noconsole >/dev/null 2>&1 )
+  [ -f "$OUT/Rxpip.class" ] || { echo "rxpip-netrexx: could not compile Rxpip.nrx" >&2; exit 1; }
+fi
+exec java -cp "$OUT:$JAR" Rxpip "$@"

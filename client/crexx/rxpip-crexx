@@ -10,6 +10,6 @@ OUT=$HOME_DIR/crexx/bin
 BIN=$OUT/rxpip.rxbin
 if [ ! -f "$BIN" ] || [ "$D/rxpip.crexx" -nt "$BIN" ]; then
   mkdir -p "$OUT" || exit 1
-  ( rxc -o "$OUT/rxpip" "$D/rxpip.crexx" >/dev/null && rxas "$OUT/rxpip" ) || { echo "rxpip-crexx: could not compile rxpip.crexx" >&2; exit 1; }
+  ( rxc -o "$OUT/rxpip" "$D/rxpip.crexx" >/dev/null 2>&1 && rxas "$OUT/rxpip" ) || { echo "rxpip-crexx: could not compile rxpip.crexx" >&2; exit 1; }
 fi
 exec rxvm "$BIN" -a "$@"
