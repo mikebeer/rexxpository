@@ -1,0 +1,976 @@
+/* ---------------------------------------------------------------------
+   RXPIP  --  the REXX package manager (NetRexx client)
+   ---------------------------------------------------------------------
+   Same commands, protocol and messages as the Regina client
+   (client/rxpip.rexx). Differences that come from the language:
+
+   * Packages for NetRexx are NetRexx source (.nrx files, one class per
+     file) published as   SOURCE / netrexx . This client installs those
+     (and nothing else: classic REXX source SOURCE/any cannot be run by
+     NetRexx).
+   * 'run' compiles your program together with the installed packages'
+     classes and runs it; 'build' writes a jar.
+   * Local state: $RXPIP_HOME (default ~/.rxpip). config.txt,
+     credentials.txt and cache/ are shared with the other clients;
+     installed packages live in <home>/netrexx/ (installed.txt, lib/, pkgs/).
+   * Requests go through curl, archives through tar (as in the other
+     clients); arguments are passed as separate process arguments, so
+     there is no shell quoting to get wrong.
+   --------------------------------------------------------------------- */
+options nosymbols
+
+import java.io.
+import java.nio.file.
+import java.util.
+import java.net.URLEncoder
+
+class Rxpip
+
+  properties static
+    home     = Rexx
+    lang     = Rexx 'netrexx'       -- platform tag of the packages this client uses
+    repoUrl  = Rexx
+    lastRc   = int 0
+    NL       = Rexx '0A'.x2c()
+    SOH      = Rexx '01'.x2c()
+
+  /* =====================================================================
+     MAIN
+     ===================================================================== */
+  method main(args=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    if args.length = 0 then do
+      cmdHelp
+      exit 0
+    end
+    h = env('RXPIP_HOME')
+    if h = '' then do
+      u = env('HOME')
+      if u = '' then u = env('USERPROFILE')
+      if u = '' then u = System.getProperty('user.home')
+      h = u.translate('/', Rexx('5C').x2c()) || '/.rxpip'
+    end
+    home = h
+    mkdirs(home || '/cache')
+    mkdirs(home || '/' || lang || '/lib')
+    mkdirs(home || '/' || lang || '/pkgs')
+    loadConfig
+
+    cmd = Rexx(args[0]).upper
+    rest = String[args.length - 1]
+    loop i = 1 to args.length - 1
+      rest[i - 1] = args[i]
+    end
+    do
+      select
+        when cmd = 'INSTALL'   then cmdInstall(rest)
+        when cmd = 'UNINSTALL' then cmdUninstall(rest)
+        when cmd = 'LIST'      then cmdList
+        when cmd = 'SEARCH'    then cmdSearch(rest)
+        when cmd = 'SHOW'      then cmdShow(rest)
+        when cmd = 'FREEZE'    then cmdFreeze
+        when cmd = 'SCAN'      then cmdScan(rest)
+        when cmd = 'RUN'       then cmdRun(rest)
+        when cmd = 'BUILD'     then cmdBuild(rest)
+        when cmd = 'PUBLISH'   then cmdPublish(rest)
+        when cmd = 'CONFIG'    then cmdConfig(rest)
+        when cmd = 'REGISTER'  then cmdRegister(rest)
+        when cmd = 'LOGIN'     then cmdLogin(rest)
+        when cmd = 'LOGOUT'    then cmdLogout
+        when cmd = 'WHOAMI'    then cmdWhoami
+        when cmd = 'TOKEN'     then cmdToken(rest)
+        when cmd = 'OWNER'     then cmdOwner(rest)
+        when cmd = 'HELP'      then cmdHelp
+        otherwise do
+          say "rxpip: unknown command '"cmd"' -- try 'rxpip help'"
+          exit 1
+        end
+      end
+    catch e = Exception
+      say 'rxpip: error:' e
+      exit 2
+    end
+    exit 0
+
+  method cmdHelp static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    say 'RXPIP -- the REXX package manager (NetRexx client)'
+    say ''
+    say 'Commands:'
+    say '  install <name>[==version]   install a package (and its deps)'
+    say '  uninstall <name>            remove an installed package'
+    say '  list                        list installed packages'
+    say '  search <term>               search the repository'
+    say '  show <name>                 show repository details for a package'
+    say '  freeze                      print installed packages as name==version'
+    say '  scan <file.nrx>             install packages named in REQUIRE comments'
+    say '  run <file.nrx> [args]       scan + auto-install, compile with the packages, run'
+    say '  build <file.nrx> [--output=out.jar]   compile with the packages into a jar'
+    say '  publish <pkgfile> --name=N --version=V [...]   upload a package (needs login)'
+    say '  register --user=U --invite=CODE   create an account (invite-only); saves your token'
+    say '  login [--token=T]           save a token (or read it from env RXPIP_TOKEN)'
+    say '  logout | whoami             forget / show the saved login'
+    say '  token new [--label=L] | list | revoke <id>   manage your API tokens'
+    say '  owner list|add|remove <pkg> [user]   manage who may publish a package'
+    say '  config get|set <key> [val]  view/change REPO_URL, LIB_DIR, INTERPRETER'
+    say '  help                        this message'
+
+  /* =====================================================================
+     COMMANDS
+     ===================================================================== */
+  method cmdInstall(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    if a.length < 1 then do
+      say 'usage: rxpip install <name>[==version]'
+      exit 1
+    end
+    installOne(Rexx(a[0]), '')
+
+  method installOne(spec=Rexx, seen=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    minver = ''
+    wantver = ''
+    if spec.pos('>=') > 0 then parse spec name '>=' minver
+    else parse spec name '==' wantver
+    name = name.strip
+    wantver = wantver.strip
+    minver = minver.strip
+    if minver \= '' then wantver = ''
+
+    if seen.wordpos(name) > 0 then return seen
+    seen = seen name
+
+    curver = installedVersion(name)
+    if curver \= '' then do
+      if (wantver = '' & minver = '') | (wantver \= '' & compareVersions(curver, wantver) >= 0) -
+         | (minver \= '' & compareVersions(curver, minver) >= 0) then do
+        say 'rxpip: 'name curver 'already installed'
+        rec = findRecord(name)
+        reqs = stanzaField(rec, 'REQUIRES').translate(' ', ',')
+        loop i = 1 to reqs.words
+          seen = installOne(depSpec(reqs.word(i)), seen)
+        end
+        return seen
+      end
+    end
+
+    info = serverGet('INFO', 'name='urlEnc(name)withVer(wantver))
+    if stanzaField(info, 'STATUS') \= 'OK' then do
+      say "rxpip: cannot resolve '"name"':" infoMessage(info)
+      return seen
+    end
+    ver = stanzaField(info, 'VERSION')
+    if minver \= '' & compareVersions(ver, minver) < 0 then do
+      say "rxpip: '"name"' needs version >="minver 'but the repository has only' ver
+      return seen
+    end
+    author   = stanzaField(info, 'AUTHOR')
+    summary  = stanzaField(info, 'SUMMARY')
+    requires = stanzaField(info, 'REQUIRES')
+
+    artresp = serverGet('ARTIFACTS', 'name='urlEnc(name)'&version='urlEnc(ver))
+    chosen = selectBestArtifact(artresp)
+    if chosen = '' then do
+      say "rxpip: no compatible artifact for '"name"'" ver '(need SOURCE/'lang')'
+      return seen
+    end
+    parse chosen kind (SOH) platform (SOH) files
+    say 'rxpip: installing' name ver'('kind'/'platform') ...'
+
+    cachefile = home'/cache/'name'-'ver'-'kind'-'platform'.rxpkg'
+    if serverDownload(name, ver, kind, platform, cachefile) \= 0 then do
+      say 'rxpip: download failed for' name ver
+      return seen
+    end
+    pkgdir = home'/'lang'/pkgs/'name'/'ver
+    deleteTree(pkgdir)
+    mkdirs(pkgdir)
+    exec(['tar', 'xzf', cachefile, '-C', pkgdir])
+    loop i = 1 to files.words
+      fn = files.word(i)
+      copyFile(pkgdir'/'fn, home'/'lang'/lib/'fn)
+    end
+    recordInstalled(name, ver, author, summary, requires, files)
+
+    reqs = requires.translate(' ', ',')
+    loop i = 1 to reqs.words
+      seen = installOne(depSpec(reqs.word(i)), seen)
+    end
+    return seen
+
+  method depSpec(tok=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    if tok.pos('>=') > 0 then do
+      parse tok dn '>=' dv
+      if dv \= '' then return dn'>='dv
+      return dn
+    end
+    return tok
+
+  method cmdUninstall(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    if a.length < 1 then do
+      say 'usage: rxpip uninstall <name>'
+      exit 1
+    end
+    name = Rexx(a[0]).strip
+    rec = findRecord(name)
+    if rec = '' then do
+      say "rxpip: '"name"' is not installed"
+      exit 1
+    end
+    files = stanzaField(rec, 'FILES')
+    loop i = 1 to files.words
+      deletePath(home'/'lang'/lib/'files.word(i))
+    end
+    deleteTree(home'/'lang'/pkgs/'name)
+    removeRecord(name)
+    say 'rxpip: removed' name
+
+  method cmdList static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    idx = home'/'lang'/installed.txt'
+    if \fileExists(idx) then do
+      say '(no packages installed)'
+      return
+    end
+    say 'NAME'.left(20) 'VERSION'.left(12) 'SUMMARY'
+    say '-'.copies(60)
+    it1 = (records()).iterator()
+    loop while it1.hasNext()
+      r = it1.next()
+      say stanzaField(Rexx(r.toString), 'NAME').left(20) stanzaField(Rexx(r.toString), 'VERSION').left(12) stanzaField(Rexx(r.toString), 'SUMMARY')
+    end
+
+  method cmdFreeze static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    it2 = (records()).iterator()
+    loop while it2.hasNext()
+      r = it2.next()
+      say stanzaField(Rexx(r.toString), 'NAME')'=='stanzaField(Rexx(r.toString), 'VERSION')
+    end
+
+  method cmdSearch(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    term = ''
+    loop i = 0 to a.length - 1
+      term = term a[i]
+    end
+    term = term.strip
+    printStanzas(serverGet('SEARCH', 'q='urlEnc(term)))
+
+  method cmdShow(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    if a.length < 1 then do
+      say 'usage: rxpip show <name>'
+      exit 1
+    end
+    resp = serverGet('INFO', 'name='urlEnc(Rexx(a[0])))
+    if stanzaField(resp, 'STATUS') \= 'OK' then do
+      say 'rxpip:' infoMessage(resp)
+      exit 1
+    end
+    printStanzas(resp)
+
+  method cmdScan(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    if a.length < 1 | \fileExists(Rexx(a[0])) then do
+      say "rxpip: file not found: '"argAt(a, 0)"'"
+      exit 1
+    end
+    reqs = scanRequires(Rexx(a[0]))
+    if reqs = '' then do
+      say 'rxpip: no REQUIRE directives found in' a[0]
+      return
+    end
+    seen = ''
+    loop i = 1 to reqs.words
+      seen = installOne(reqs.word(i), seen)
+    end
+
+  /* REQUIRE directives: a comment line  /* REQUIRE name[>=ver] */  or  -- REQUIRE name[>=ver] */
+  method scanRequires(fn=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    out = ''
+    txt = readText(fn)
+    loop while txt \= ''
+      parse txt line (NL) txt
+      l = line.strip
+      body = ''
+      if l.left(2) = '/*' then do
+        body = l.substr(3)
+        p = body.pos('*/')
+        if p > 0 then body = body.left(p - 1)
+      end
+      else if l.left(2) = '--' then body = l.substr(3)
+      else iterate
+      body = body.strip
+      if body.left(7).upper \= 'REQUIRE' then iterate
+      spec = body.substr(8).strip
+      if spec = '' then iterate
+      out = out spec
+    end
+    return out.strip
+
+  /* compile the user's program together with the installed packages' classes */
+  method compileProgram(src=Rexx, outdir=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    mkdirs(outdir)
+    base = baseName(src)
+    copyFile(src, outdir'/'base)
+    libdir = home'/'lang'/lib'
+    names = listDir(libdir)
+    files = String[ ]    -- placeholder, replaced below
+    cmd = ArrayList()
+    cmd.add('java')
+    cmd.add('-cp')
+    cmd.add(System.getProperty('java.class.path'))
+    cmd.add('COM.ibm.netrexx.process.NetRexxC')
+    cmd.add(base.toString)
+    it3 = (names).iterator()
+    loop while it3.hasNext()
+      n = it3.next()
+      if Rexx(n.toString).right(4).lower = '.nrx' then do
+        copyFile(libdir'/'n, outdir'/'n)
+        cmd.add(n.toString)
+      end
+    end
+    cmd.add('-nologo')
+    cmd.add('-sourcedir')
+    rc = execInDir(cmd, outdir, 0)
+    return rc
+
+  method cmdRun(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    if a.length < 1 | \fileExists(Rexx(a[0])) then do
+      say "rxpip: file not found: '"argAt(a, 0)"'"
+      exit 1
+    end
+    src = Rexx(a[0])
+    seen = ''
+    reqs = scanRequires(src)
+    loop i = 1 to reqs.words
+      seen = installOne(reqs.word(i), seen)
+    end
+    tmp = home'/run_'System.nanoTime()
+    rc = compileProgram(src, tmp)
+    if rc \= 0 then do
+      say 'rxpip: compilation failed'
+      deleteTree(tmp)
+      exit 1
+    end
+    cls = baseName(src)
+    cls = cls.left(cls.length - 4)
+    cmd = ArrayList()
+    cmd.add('java')
+    cmd.add('-cp')
+    cmd.add(tmp'/:'System.getProperty('java.class.path'))
+    cmd.add(cls.toString)
+    loop i = 1 to a.length - 1
+      cmd.add(a[i])
+    end
+    runrc = execInDir(cmd, Rexx('.'), 1)
+    deleteTree(tmp)
+    exit runrc
+
+  method cmdBuild(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    if a.length < 1 | \fileExists(Rexx(a[0])) then do
+      say 'usage: rxpip build <file.nrx> [--output=out.jar]'
+      exit 1
+    end
+    src = Rexx(a[0])
+    out = opt(a, 'output')
+    cls = baseName(src)
+    cls = cls.left(cls.length - 4)
+    if out = '' then out = 'build_'cls'.jar'
+    seen = ''
+    reqs = scanRequires(src)
+    loop i = 1 to reqs.words
+      seen = installOne(reqs.word(i), seen)
+    end
+    tmp = home'/build_'System.nanoTime()
+    rc = compileProgram(src, tmp)
+    if rc \= 0 then do
+      say 'rxpip: compilation failed'
+      deleteTree(tmp)
+      exit 1
+    end
+    -- jar of every compiled class, Main-Class = the user's program
+    mf = Manifest()
+    mf.getMainAttributes().put(java.util.jar.Attributes.Name.MANIFEST_VERSION, '1.0')
+    mf.getMainAttributes().put(java.util.jar.Attributes.Name.MAIN_CLASS, cls.toString)
+    jos = java.util.jar.JarOutputStream(FileOutputStream(out.toString), mf)
+    it4 = (listDir(tmp)).iterator()
+    loop while it4.hasNext()
+      n = it4.next()
+      if Rexx(n.toString).right(6) = '.class' then do
+        jos.putNextEntry(java.util.zip.ZipEntry(n.toString))
+        jos.write(Files.readAllBytes(File((tmp'/'n).toString).toPath()))
+        jos.closeEntry()
+      end
+    end
+    jos.close()
+    deleteTree(tmp)
+    say 'rxpip: wrote self-contained jar to' out '(run: java -cp' out':NetRexxR.jar' cls')'
+
+  /* ---- accounts, tokens, owners ---- */
+  method cmdPublish(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    if a.length < 1 | \fileExists(Rexx(a[0])) then do
+      say 'usage: rxpip publish <file.rxpkg> --name=X --version=Y [--token=T]' -
+          '[--author=A --summary=S --requires=R --kind=SOURCE|BYTECODE --platform=TAG]'
+      exit 1
+    end
+    pkgfile = Rexx(a[0])
+    name = opt(a, 'name')
+    ver = opt(a, 'version')
+    kind = opt(a, 'kind')
+    if kind = '' then kind = 'SOURCE'
+    platform = opt(a, 'platform')
+    if platform = '' then platform = lang
+    token = resolveToken(a)
+    if name = '' | ver = '' | token = '' then do
+      say 'rxpip: --name, --version and a login are required (rxpip login, or --token=T, or env RXPIP_TOKEN)'
+      exit 1
+    end
+    if \tokenLooksValid(token) then do
+      say 'rxpip: token must be 16-128 characters from A-Z a-z 0-9 . _ ~ -'
+      exit 1
+    end
+    hdrs = ArrayList()
+    hdrs.add('X-Rxpip-Name: 'name)
+    hdrs.add('X-Rxpip-Version: 'ver)
+    hdrs.add('X-Rxpip-Author: 'opt(a, 'author'))
+    hdrs.add('X-Rxpip-Summary: 'opt(a, 'summary'))
+    hdrs.add('X-Rxpip-Requires: 'opt(a, 'requires'))
+    hdrs.add('X-Rxpip-Kind: 'kind)
+    hdrs.add('X-Rxpip-Platform: 'platform)
+    sec = ArrayList()
+    sec.add('X-Rxpip-Token: 'token)
+    exit showResponse(serverPost('PUBLISH', '', hdrs, sec, pkgfile))
+
+  method cmdRegister(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    user = opt(a, 'user')
+    inv = opt(a, 'invite')
+    if inv = '' then inv = env('RXPIP_INVITE')
+    if user = '' | inv = '' then do
+      say 'usage: rxpip register --user=<name> --invite=<code>   (invite from the repository admin)'
+      exit 1
+    end
+    hdrs = ArrayList()
+    hdrs.add('X-Rxpip-User: 'user)
+    sec = ArrayList()
+    sec.add('X-Rxpip-Invite: 'inv)
+    out = serverPost('REGISTER', '', hdrs, sec, Rexx '')
+    if stanzaField(out, 'STATUS') \= 'OK' then do
+      showResponse(out)
+      exit 1
+    end
+    saveCredential(user, stanzaField(out, 'TOKEN'))
+    say 'registered as 'user'; your token was saved in 'home'/credentials.txt'
+    say 'Treat that file like a password. You can now: rxpip publish ...'
+
+  method cmdLogin(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    t = opt(a, 'token')
+    if t = '' then t = env('RXPIP_TOKEN')
+    if t = '' | \tokenLooksValid(t) then do
+      say 'usage: rxpip login --token=<token>   (or set env RXPIP_TOKEN)'
+      exit 1
+    end
+    sec = ArrayList()
+    sec.add('X-Rxpip-Token: 't)
+    out = serverPost('WHOAMI', '', ArrayList(), sec, Rexx '')
+    if stanzaField(out, 'STATUS') \= 'OK' then do
+      showResponse(out)
+      exit 1
+    end
+    u = stanzaField(out, 'USER')
+    saveCredential(u, t)
+    say 'logged in as' u
+
+  method cmdLogout static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    removeCredential
+    say 'logged out of' repoUrl
+
+  method authCall(action=Rexx, hdrs=ArrayList) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    t = resolveToken(String[0])
+    if t = '' then do
+      say 'not logged in (rxpip login --token=T)'
+      exit 1
+    end
+    sec = ArrayList()
+    sec.add('X-Rxpip-Token: 't)
+    return serverPost(action, '', hdrs, sec, Rexx '')
+
+  method cmdWhoami static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    t = resolveToken(String[0])
+    if t = '' then do
+      say 'not logged in'
+      exit 1
+    end
+    exit showResponse(authCall('WHOAMI', ArrayList()))
+
+  method cmdToken(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    sub = argAt(a, 0).upper
+    hdrs = ArrayList()
+    select
+      when sub = 'NEW' then do
+        lbl = opt(a, 'label')
+        if lbl \= '' then hdrs.add('X-Rxpip-Label: 'lbl)
+        exit showResponse(authCall('NEWTOKEN', hdrs))
+      end
+      when sub = 'LIST' then exit showResponse(authCall('TOKENS', hdrs))
+      when sub = 'REVOKE' then do
+        if a.length < 2 then do
+          say 'usage: rxpip token revoke <token-id>   (see: rxpip token list)'
+          exit 1
+        end
+        hdrs.add('X-Rxpip-Token-Id: 'a[1])
+        exit showResponse(authCall('REVOKE', hdrs))
+      end
+      otherwise do
+        say 'usage: rxpip token new [--label=L] | list | revoke <id>'
+        exit 1
+      end
+    end
+
+  method cmdOwner(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    sub = argAt(a, 0).upper
+    pkg = argAt(a, 1)
+    who = argAt(a, 2)
+    if pkg = '' | (sub \= 'LIST' & who = '') | (sub \= 'LIST' & sub \= 'ADD' & sub \= 'REMOVE') then do
+      say 'usage: rxpip owner list <pkg> | add <pkg> <user> | remove <pkg> <user>'
+      exit 1
+    end
+    if sub = 'LIST' then exit showResponse(serverGet('OWNERS', 'name='urlEnc(pkg)))
+    hdrs = ArrayList()
+    hdrs.add('X-Rxpip-Name: 'pkg)
+    hdrs.add('X-Rxpip-User: 'who)
+    exit showResponse(authCall(sub'OWNER', hdrs))
+
+  method cmdConfig(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    sub = argAt(a, 0).upper
+    select
+      when sub = 'GET' & a.length > 1 then say Rexx(a[1])':' getConfig(Rexx(a[1]))
+      when sub = 'SET' & a.length > 2 then do
+        setConfig(Rexx(a[1]), Rexx(a[2]))
+        say 'rxpip: set' a[1] '=' a[2]
+      end
+      otherwise do
+        say 'REPO_URL:' getConfig('REPO_URL')
+        say 'LIB_DIR:' getConfig('LIB_DIR')
+        say 'INTERPRETER:' getConfig('INTERPRETER')
+      end
+    end
+
+  /* =====================================================================
+     CONFIG AND CREDENTIALS
+     ===================================================================== */
+  method loadConfig static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    cf = home'/config.txt'
+    if \fileExists(cf) then
+      writeText(cf, 'REPO_URL: https://www.rexxpository.org/cgi-bin/rxpip_server.rexx'-
+        || NL || 'LIB_DIR: 'home'/lib'-
+        || NL || 'INTERPRETER: regina'-
+        || NL)
+    repoUrl = getConfig('REPO_URL')
+
+  method getConfig(key=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    cf = home'/config.txt'
+    val = ''
+    if fileExists(cf) then do
+      txt = readText(cf)
+      loop while txt \= ''
+        parse txt line (NL) txt
+        parse line k ':' v
+        if k.strip.upper = key.upper then val = v.strip
+      end
+    end
+    return val
+
+  method setConfig(key=Rexx, val=Rexx) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    cf = home'/config.txt'
+    key = key.upper
+    out = ''
+    done = 0
+    txt = ''
+    if fileExists(cf) then txt = readText(cf)
+    loop while txt \= ''
+      parse txt line (NL) txt
+      if line.strip = '' then iterate
+      parse line k ':' v
+      if k.strip.upper = key then do
+        out = out || key': 'val || NL
+        done = 1
+      end
+      else out = out || line || NL
+    end
+    if \done then out = out || key': 'val || NL
+    replaceText(cf, out)
+    repoUrl = getConfig('REPO_URL')
+
+  /* credentials.txt: one line per repository:  <repo_url> <user> <token>  */
+  method getCredential static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    f = home'/credentials.txt'
+    res = ''
+    if fileExists(f) then do
+      txt = readText(f)
+      loop while txt \= ''
+        parse txt line (NL) txt
+        parse line r u t .
+        if r = repoUrl then res = u || SOH || t
+      end
+    end
+    return res
+
+  method credentialLines(skipRepo=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    f = home'/credentials.txt'
+    keep = ''
+    if fileExists(f) then do
+      txt = readText(f)
+      loop while txt \= ''
+        parse txt line (NL) txt
+        parse line r .
+        if line.strip \= '' & r \= skipRepo then keep = keep || line || NL
+      end
+    end
+    return keep
+
+  method saveCredential(user=Rexx, token=Rexx) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    content = credentialLines(repoUrl) || repoUrl user token || NL
+    writePrivate(home'/credentials.txt', content)
+
+  method removeCredential static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    keep = credentialLines(repoUrl)
+    f = home'/credentials.txt'
+    if keep = '' then deletePath(f)
+    else writePrivate(f, keep)
+
+  method resolveToken(a=String[]) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    t = opt(a, 'token')
+    if t = '' then t = env('RXPIP_TOKEN')
+    if t = '' then do
+      parse getCredential() u (SOH) t
+    end
+    return t
+
+  method tokenLooksValid(t=Rexx) static returns boolean signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    if t.length < 16 | t.length > 128 then return 0
+    return t.verify('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~-') = 0
+
+  /* =====================================================================
+     HTTP (curl)
+     ===================================================================== */
+  method serverGet(action=Rexx, extra=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    url = repoUrl'?action='action
+    if extra \= '' then url = url'&'extra
+    return exec(['curl', '-s', url])
+
+  method serverDownload(name=Rexx, ver=Rexx, kind=Rexx, platform=Rexx, outfile=Rexx) static returns int signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    url = repoUrl'?action=DOWNLOAD&name='urlEnc(name)
+    if ver \= '' then url = url'&version='urlEnc(ver)
+    url = url'&kind='urlEnc(kind)'&platform='urlEnc(platform)
+    exec(['curl', '-s', '-f', '-o', outfile, url])
+    return lastRc
+
+  /* POST. hdrs: ordinary "Name: value" headers; secrets: header lines that
+     must not appear in the URL or on a command line, so they go to curl
+     through a private temporary file (curl -H @file). bodyfile may be ''. */
+  method serverPost(action=Rexx, extra=Rexx, hdrs=ArrayList, secrets=ArrayList, bodyfile=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    url = repoUrl'?action='action
+    if extra \= '' then url = url'&'extra
+    hf = File.createTempFile('rxpip_hdr_', '.tmp')
+    do
+      if \isWindows then do
+        do
+          perms = java.util.HashSet()
+          perms.add(java.nio.file.attribute.PosixFilePermission.OWNER_READ)
+          perms.add(java.nio.file.attribute.PosixFilePermission.OWNER_WRITE)
+          Files.setPosixFilePermissions(hf.toPath(), perms)
+        catch Exception
+          nop
+        end
+      end
+      sb = StringBuilder()
+      it5 = (secrets).iterator()
+      loop while it5.hasNext()
+        s = it5.next()
+        sb.append(s.toString).append('\n')
+      end
+      sb.append('\n')
+      Files.write(hf.toPath(), sb.toString().getBytes('UTF-8'), OpenOption[0])
+      cmd = ArrayList()
+      cmd.add('curl'); cmd.add('-s'); cmd.add('-X'); cmd.add('POST')
+      cmd.add('-H'); cmd.add('@'hf.getPath())
+      it6 = (hdrs).iterator()
+      loop while it6.hasNext()
+        h = it6.next()
+        cmd.add('-H'); cmd.add(h.toString)
+      end
+      if bodyfile \= '' then do
+        cmd.add('--data-binary'); cmd.add('@'bodyfile)
+      end
+      else do
+        cmd.add('-d'); cmd.add('')
+      end
+      cmd.add(url.toString)
+      out = execList(cmd)
+    finally
+      hf.delete()
+    end
+    return out
+
+  method showResponse(out=Rexx) static returns int signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    say out
+    if out = '' then do
+      say 'rxpip: no response from server'
+      return 1
+    end
+    if out.word(1) = 'STATUS:' & out.word(2) = 'OK' then return 0
+    return 1
+
+  /* =====================================================================
+     STANZAS, VERSIONS, ARTIFACTS
+     ===================================================================== */
+  method stanzaField(resp=Rexx, key=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    tag = key':'
+    txt = resp
+    loop while txt \= ''
+      parse txt line (NL) txt
+      if line.left(tag.length) = tag then return line.substr(tag.length + 1).strip
+    end
+    return ''
+
+  method printStanzas(resp=Rexx) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    txt = resp
+    loop while txt \= ''
+      parse txt line (NL) txt
+      if line = 'STATUS: OK' then iterate
+      if line.left(6) = 'COUNT:' then iterate
+      say line
+    end
+
+  method infoMessage(resp=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    m = stanzaField(resp, 'MESSAGE')
+    if m = '' then m = 'no response from server'
+    return m
+
+  method withVer(v=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    if v = '' then return ''
+    return '&version='urlEnc(v)
+
+  method compareVersions(a=Rexx, b=Rexx) static returns int signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    aa = a.translate(' ', '.')
+    bb = b.translate(' ', '.')
+    n = aa.words
+    if bb.words > n then n = bb.words
+    loop i = 1 to n
+      x = 0
+      y = 0
+      if i <= aa.words then x = aa.word(i)
+      if i <= bb.words then y = bb.word(i)
+      if x < y then return -1
+      if x > y then return 1
+    end
+    return 0
+
+  /* the artifact to install: SOURCE/<lang> (this client's language) */
+  method selectBestArtifact(resp=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    best = ''
+    curK = ''
+    curP = ''
+    txt = resp
+    loop while txt \= ''
+      parse txt line (NL) txt
+      if line.left(5) = 'KIND:' then curK = line.substr(6).strip
+      else if line.left(9) = 'PLATFORM:' then curP = line.substr(10).strip
+      else if line.left(6) = 'FILES:' then do
+        f = line.substr(7).strip
+        if curK.upper = 'SOURCE' & curP.lower = lang.lower then best = curK || SOH || curP || SOH || f
+        curK = ''
+        curP = ''
+      end
+    end
+    return best
+
+  method urlEnc(s=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    return Rexx(URLEncoder.encode(s.toString, 'UTF-8'))
+
+  method replaceOpt static returns CopyOption[] signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    o = CopyOption[1]
+    o[0] = StandardCopyOption.REPLACE_EXISTING
+    return o
+
+  method strList(al=ArrayList) static returns ArrayList
+    r = ArrayList()
+    it7 = (al).iterator()
+    loop while it7.hasNext()
+      o = it7.next()
+      r.add(o.toString)
+    end
+    return r
+
+  method argAt(a=String[], i=int) static returns Rexx
+    if i < a.length then return Rexx(a[i])
+    return Rexx ''
+
+  method opt(a=String[], key=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    needle = '--'key'='
+    loop i = 0 to a.length - 1
+      w = Rexx(a[i])
+      if w.left(needle.length) = needle then return w.substr(needle.length + 1)
+    end
+    return ''
+
+  /* =====================================================================
+     INSTALLED-PACKAGE DATABASE  (<home>/netrexx/installed.txt, same record
+     format as the other clients: NAME/VERSION/AUTHOR/SUMMARY/REQUIRES/FILES)
+     ===================================================================== */
+  method records static returns ArrayList signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    res = ArrayList()
+    idx = home'/'lang'/installed.txt'
+    if \fileExists(idx) then return res
+    txt = readText(idx)
+    cur = ''
+    loop while txt \= ''
+      parse txt line (NL) txt
+      if line = '' then do
+        if cur \= '' then res.add(cur)
+        cur = ''
+      end
+      else cur = cur || line || NL
+    end
+    if cur \= '' then res.add(cur)
+    return res
+
+  method findRecord(name=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    it8 = (records()).iterator()
+    loop while it8.hasNext()
+      r = it8.next()
+      if stanzaField(Rexx(r.toString), 'NAME') = name then return Rexx(r.toString)
+    end
+    return ''
+
+  method installedVersion(name=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    rec = findRecord(name)
+    if rec = '' then return ''
+    return stanzaField(rec, 'VERSION')
+
+  method removeRecord(name=Rexx) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    out = ''
+    it9 = (records()).iterator()
+    loop while it9.hasNext()
+      r = it9.next()
+      if stanzaField(Rexx(r.toString), 'NAME') \= name then out = out || Rexx(r.toString) || NL
+    end
+    replaceText(home'/'lang'/installed.txt', out)
+
+  method recordInstalled(name=Rexx, ver=Rexx, author=Rexx, summary=Rexx, requires=Rexx, files=Rexx) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    removeRecord(name)
+    idx = home'/'lang'/installed.txt'
+    cur = ''
+    if fileExists(idx) then cur = readText(idx)
+    cur = cur'NAME: 'name || NL || 'VERSION: 'ver || NL || 'AUTHOR: 'author || NL-
+      || 'SUMMARY: 'summary || NL || 'REQUIRES: 'requires || NL || 'FILES: 'files || NL || NL
+    replaceText(idx, cur)
+
+  /* =====================================================================
+     SYSTEM LAYER  (files and processes)
+     ===================================================================== */
+  method env(name=String) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    v = System.getenv(name)
+    if v = null then return ''
+    return Rexx v
+
+  method isWindows static returns boolean signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    return System.getProperty('os.name').toLowerCase().startsWith('windows')
+
+  method fileExists(f=Rexx) static returns boolean signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    return File(f.toString).exists()
+
+  method mkdirs(d=Rexx) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    File(d.toString).mkdirs()
+
+  method readText(f=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    return Rexx(String(Files.readAllBytes(File(f.toString).toPath()), 'UTF-8'))
+
+  method replaceText(f=Rexx, content=Rexx) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    tmp = f'.new'
+    Files.write(File(tmp.toString).toPath(), content.toString.getBytes('UTF-8'), OpenOption[0])
+    Files.move(File(tmp.toString).toPath(), File(f.toString).toPath(), replaceOpt())
+
+  method writeText(f=Rexx, content=Rexx) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    replaceText(f, content)
+
+  /* write a file that only the owner can read (mode 600 on Unix) */
+  method writePrivate(f=Rexx, content=Rexx) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    tmp = f'.new'
+    p = File(tmp.toString).toPath()
+    Files.deleteIfExists(p)
+    if \isWindows then do
+      do
+        perms = java.util.HashSet()
+        perms.add(java.nio.file.attribute.PosixFilePermission.OWNER_READ)
+        perms.add(java.nio.file.attribute.PosixFilePermission.OWNER_WRITE)
+        fa = java.nio.file.attribute.FileAttribute[1]
+        fa[0] = java.nio.file.attribute.PosixFilePermissions.asFileAttribute(perms)
+        Files.createFile(p, fa)
+      catch Exception
+        nop
+      end
+    end
+    Files.write(p, content.toString.getBytes('UTF-8'), OpenOption[0])
+    Files.move(p, File(f.toString).toPath(), replaceOpt())
+
+  method copyFile(src=Rexx, dst=Rexx) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    Files.copy(File(src.toString).toPath(), File(dst.toString).toPath(), replaceOpt())
+
+  method deletePath(f=Rexx) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    do
+      Files.deleteIfExists(File(f.toString).toPath())
+    catch Exception
+      nop
+    end
+
+  method deleteTree(d=Rexx) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    f = File(d.toString)
+    if \f.exists() then return
+    if f.isDirectory() then do
+      kids = f.list()
+      if kids \= null then do
+        loop j = 0 to kids.length - 1
+          deleteTree(d'/'kids[j])
+        end
+      end
+    end
+    f.delete()
+
+  method listDir(d=Rexx) static returns ArrayList signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    res = ArrayList()
+    kids = File(d.toString).list()
+    if kids \= null then do
+      Arrays.sort(kids)
+      loop j = 0 to kids.length - 1
+        res.add(kids[j])
+      end
+    end
+    return res
+
+  method baseName(p=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    return Rexx(File(p.toString).getName())
+
+  /* run a command, return its standard output as text; stderr passes through */
+  method exec(argv=Rexx[]) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    al = ArrayList()
+    loop i = 0 to argv.length - 1
+      al.add(argv[i].toString)
+    end
+    return execList(al)
+
+  method execList(al=ArrayList) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    pb = ProcessBuilder(strList(al))
+    pb.redirectError(ProcessBuilder.Redirect.INHERIT)
+    p = pb.start()
+    bytes = p.getInputStream().readAllBytes()
+    lastRc = p.waitFor()
+    return Rexx(String(bytes, 'UTF-8'))
+
+  /* run a command in a directory; inherit=1 connects it to our console */
+  method execInDir(cmd=ArrayList, dir=Rexx, inherit=boolean) static returns int signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    pb = ProcessBuilder(strList(cmd))
+    pb.directory(File(dir.toString))
+    if inherit then pb.inheritIO()
+    else pb.redirectErrorStream(1)
+    p = pb.start()
+    if \inherit then do
+      out = Rexx(String(p.getInputStream().readAllBytes(), 'UTF-8'))
+      rc = p.waitFor()
+      if rc \= 0 then say out
+      return rc
+    end
+    return p.waitFor()

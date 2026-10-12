@@ -1,0 +1,4 @@
+/* REQUIRE nxutils */
+class hello
+  method main(a=String[]) static
+    say NxUtils.shout(Rexx 'hello netrexx') NxUtils.twice(21)

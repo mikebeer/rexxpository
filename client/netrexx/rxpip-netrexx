@@ -1,0 +1,7 @@
+#!/bin/sh
+# RXPIP NetRexx client launcher. Needs Java and NetRexxC.jar (NetRexx 3.x/4.x).
+# Set NETREXX_JAR if the jar is not next to this script.
+D=$(cd "$(dirname "$0")" && pwd)
+JAR=${NETREXX_JAR:-$D/NetRexxC.jar}
+[ -f "$JAR" ] || { echo "rxpip-netrexx: NetRexxC.jar not found (set NETREXX_JAR)" >&2; exit 1; }
+exec java -cp "$D:$JAR" Rxpip "$@"

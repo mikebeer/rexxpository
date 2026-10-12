@@ -1,0 +1,6 @@
+/* NxUtils -- tiny NetRexx helper package for rxpip tests/examples */
+class NxUtils
+  method shout(s=Rexx) static returns Rexx
+    return s.upper || '!'
+  method twice(n=int) static returns int
+    return n * 2

@@ -3,3 +3,4 @@ testrepo/
 *.rxpkg
 .rxpip/
 run_*.rexx
+*.class
