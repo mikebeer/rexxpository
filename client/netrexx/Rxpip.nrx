@@ -31,6 +31,7 @@ class Rxpip
     lang     = Rexx 'netrexx'       -- platform tag of the packages this client uses
     repoUrl  = Rexx
     lastRc   = int 0
+    upgrade  = int 0
     NL       = Rexx '0A'.x2c()
     SOH      = Rexx '01'.x2c()
 
@@ -95,7 +96,7 @@ class Rxpip
     say 'RXPIP -- the REXX package manager (NetRexx client)'
     say ''
     say 'Commands:'
-    say '  install <name>[==version]   install a package (and its deps)'
+    say '  install [--upgrade] <name>[==version]   install a package (and its deps); --upgrade/-U updates an installed one'
     say '  uninstall <name>            remove an installed package'
     say '  list                        list installed packages'
     say '  search <term>               search the repository'
@@ -117,11 +118,17 @@ class Rxpip
      COMMANDS
      ===================================================================== */
   method cmdInstall(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
-    if a.length < 1 then do
-      say 'usage: rxpip install <name>[==version]'
+    spec = Rexx ''
+    loop i = 0 to a.length - 1
+      w = Rexx(a[i])
+      if w = '--upgrade' | w = '-U' then upgrade = 1
+      else if spec = '' then spec = w
+    end
+    if spec = '' then do
+      say 'usage: rxpip install [--upgrade] <name>[==version]'
       exit 1
     end
-    installOne(Rexx(a[0]), '')
+    installOne(spec, '')
 
   method installOne(spec=Rexx, seen=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
     minver = ''
@@ -136,8 +143,18 @@ class Rxpip
     if seen.wordpos(name) > 0 then return seen
     seen = seen name
 
+    -- --upgrade applies to the package named on the command line only
+    up = upgrade
+    upgrade = 0
     curver = installedVersion(name)
-    if curver \= '' then do
+    newer = 0
+    if curver \= '' & up = 1 & wantver = '' & minver = '' then do
+      info0 = serverGet('INFO', 'name='urlEnc(name))
+      if stanzaField(info0, 'STATUS') = 'OK' then do
+        if compareVersions(stanzaField(info0, 'VERSION'), curver) > 0 then newer = 1
+      end
+    end
+    if curver \= '' & newer = 0 then do
       if (wantver = '' & minver = '') | (wantver \= '' & compareVersions(curver, wantver) >= 0) -
          | (minver \= '' & compareVersions(curver, minver) >= 0) then do
         say 'rxpip: 'name curver 'already installed'
@@ -177,6 +194,13 @@ class Rxpip
     if serverDownload(name, ver, kind, platform, cachefile) \= 0 then do
       say 'rxpip: download failed for' name ver
       return seen
+    end
+    if curver \= '' then do
+      -- replacing an older version: drop its files so none linger
+      oldfiles = stanzaField(findRecord(name), 'FILES')
+      loop k = 1 to oldfiles.words
+        deletePath(home'/'lang'/lib/'oldfiles.word(k))
+      end
     end
     pkgdir = home'/'lang'/pkgs/'name'/'ver
     deleteTree(pkgdir)
@@ -223,7 +247,7 @@ class Rxpip
 
   method cmdList static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
     idx = home'/'lang'/installed.txt'
-    if \fileExists(idx) then do
+    if \fileExists(idx) | records().size() = 0 then do
       say '(no packages installed)'
       return
     end

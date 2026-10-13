@@ -122,7 +122,7 @@ CmdHelp:
   say 'RXPIP -- the REXX package manager'
   say ''
   say 'Commands:'
-  say '  install <name>[==version]   install a package (and its deps)'
+  say '  install [--upgrade] <name>[==version]   install a package (and its deps); --upgrade/-U updates an installed one'
   say '  uninstall <name>            remove an installed package'
   say '  list                        list installed packages'
   say '  search <term>               search the repository'
@@ -142,13 +142,20 @@ CmdHelp:
   return
 
 CmdInstall: procedure expose home cfg.
-  parse arg spec '01'x .
-  spec = strip(spec)
+  parse arg all
+  spec = ''
+  upg = 0
+  do while all \= ''
+    parse var all one '01'x all
+    if one = '--upgrade' | one = '-U' then upg = 1
+    else if spec = '' then spec = strip(one)
+  end
   if spec = '' then do
-    say 'usage: rxpip install <name>[==version]'
+    say 'usage: rxpip install [--upgrade] <name>[==version]'
     exit 1
     return
   end
+  cfg.UPGRADE = upg
   seen = ''
   call InstallOne spec, seen
   return
@@ -171,8 +178,19 @@ InstallOne: procedure expose home cfg.
   if wordpos(name, seen) > 0 then return seen  /* cycle guard */
   seen = seen name
 
+  /* --upgrade applies to the package named on the command line only */
+  upg = cfg.UPGRADE
+  cfg.UPGRADE = 0
+
   curver = InstalledVersion(home, name)
-  if curver \= '' then do
+  newer = 0
+  if curver \= '' & upg & wantver = '' & minver = '' then do
+    info0 = ServerGet(cfg.REPO_URL, 'INFO', 'name=' || UrlEncode(name))
+    if StanzaField(info0, 'STATUS') = 'OK' then do
+      if CompareVersions(StanzaField(info0, 'VERSION'), curver) > 0 then newer = 1
+    end
+  end
+  if curver \= '' & \newer then do
     if (wantver = '' & minver = '') | (wantver \= '' & CompareVersions(curver, wantver) >= 0) | ,
        (minver \= '' & CompareVersions(curver, minver) >= 0) then do
       say 'rxpip: ' || name || ' ' || curver || ' already installed'
@@ -228,6 +246,15 @@ InstallOne: procedure expose home cfg.
   if rc \= 0 then do
     say 'rxpip: download failed for' name ver
     return seen
+  end
+
+  if curver \= '' then do
+    /* replacing an older version: drop its files from lib/ first, so a
+       file that no longer exists in the new version does not linger */
+    oldfiles = StanzaFieldPlain(FindInstalledRecord(home, name), 'FILES')
+    do i = 1 to words(oldfiles)
+      call DelFile home || '/lib/' || word(oldfiles, i)
+    end
   end
 
   pkgdir = home || '/pkgs/' || name || '/' || ver
@@ -779,6 +806,7 @@ LoadOrInitConfig: procedure expose cfg. home
   cfg.REPO_URL = GetConfigValue(home, 'REPO_URL')
   cfg.LIB_DIR = GetConfigValue(home, 'LIB_DIR')
   cfg.INTERPRETER = GetConfigValue(home, 'INTERPRETER')
+  cfg.UPGRADE = 0
   return
 
 GetConfigValue: procedure
@@ -862,19 +890,27 @@ RemoveInstalledRecord: procedure
   idx = home || '/installed.txt'
   if \FileExists(idx) then return
   tmp = idx || '.new'
+  call DelFile tmp
   skip = 0
+  kept = 0
   do while lines(idx) > 0
     l = linein(idx)
     if left(l,5) = 'NAME:' then do
       curname = strip(substr(l,6))
       skip = (curname = name)
     end
-    if \skip then call charout tmp, l || '0a'x
+    if \skip then do
+      call charout tmp, l || '0a'x
+      kept = 1
+    end
     if l = '' then skip = 0
   end
   call stream idx, 'c', 'close'
-  call stream tmp, 'c', 'close'
-  call MoveFile tmp, idx
+  if kept then do
+    call stream tmp, 'c', 'close'
+    call MoveFile tmp, idx
+  end
+  else call DelFile idx        /* nothing left: no empty file, no failing move */
   return
 
 RecordInstalled: procedure expose home

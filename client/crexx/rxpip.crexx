@@ -17,7 +17,7 @@
    * Needs rxc, rxas and rxvm on the PATH (or CREXX_HOME/bin) for run/build.
    --------------------------------------------------------------------- */
 options levelb
-namespace rxpip expose home lang repoUrl NL SOH lastrc
+namespace rxpip expose home lang repoUrl NL SOH lastrc upgrade
 import rxfnsb
 
 main: procedure = .int
@@ -26,6 +26,7 @@ main: procedure = .int
   SOH = '01'x
   lang = 'crexx'
   lastrc = 0
+  upgrade = 0
   home = getenv('RXPIP_HOME')
   if home = '' then do
     h = getenv('HOME')
@@ -75,7 +76,7 @@ cmdHelp: procedure = .void
   say 'RXPIP -- the REXX package manager (cREXX client)'
   say ''
   say 'Commands:'
-  say '  install <name>[==version]   install a package (and its deps)'
+  say '  install [--upgrade] <name>[==version]   install a package (and its deps); --upgrade/-U updates an installed one'
   say '  uninstall <name>            remove an installed package'
   say '  list                        list installed packages'
   say '  search <term>               search the repository'
@@ -99,11 +100,16 @@ cmdHelp: procedure = .void
    ===================================================================== */
 cmdInstall: procedure = .void
   arg a = .string[]
-  if a.0 < 1 then do
-    say 'usage: rxpip install <name>[==version]'
+  spec = ''
+  do j = 1 to a.0
+    if a[j] = '--upgrade' | a[j] = '-U' then upgrade = 1
+    else if spec = '' then spec = a[j]
+  end
+  if spec = '' then do
+    say 'usage: rxpip install [--upgrade] <name>[==version]'
     exit 1
   end
-  seen = installOne(a[1], '')
+  seen = installOne(spec, '')
   return
 
 installOne: procedure = .string
@@ -127,8 +133,18 @@ installOne: procedure = .string
   if wordpos(name, seen) > 0 then return seen
   seen = seen name
 
+  /* --upgrade applies to the package named on the command line only */
+  up = upgrade
+  upgrade = 0
   curver = installedVersion(name)
-  if curver \= '' then do
+  newer = 0
+  if curver \= '' & up = 1 & wantver = '' & minver = '' then do
+    info0 = serverGet('INFO', 'name=' || urlEnc(name))
+    if stanzaField(info0, 'STATUS') = 'OK' then do
+      if compareVersions(stanzaField(info0, 'VERSION'), curver) > 0 then newer = 1
+    end
+  end
+  if curver \= '' & newer = 0 then do
     satisfied = 0
     if wantver = '' & minver = '' then satisfied = 1
     else if wantver \= '' then do
@@ -180,6 +196,13 @@ installOne: procedure = .string
   if serverDownload(name, ver, kind, platform, cachefile) \= 0 then do
     say 'rxpip: download failed for' name ver
     return seen
+  end
+  if curver \= '' then do
+    /* replacing an older version: drop its files so none linger */
+    oldfiles = stanzaField(findRecord(name), 'FILES')
+    do k = 1 to words(oldfiles)
+      call rmfile(home || '/' || lang || '/lib/' || word(oldfiles, k))
+    end
   end
   pkgdir = home || '/' || lang || '/pkgs/' || name || '/' || ver
   call rmtree(pkgdir)
