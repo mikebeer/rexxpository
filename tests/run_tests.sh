@@ -357,6 +357,7 @@ expect "admin lock revokes all of a user's tokens" "$BODY" "BAD_TOKEN"
 
 # ============================================================================
 section "step 1: client publish / install / run (real client over HTTP)"
+mkdir -p "$WORK/cwd"; cd "$WORK/cwd"          # the client installs into the current directory
 CH=$WORK/clienthome
 export RXPIP_HOME=$CH
 mkdir -p "$CH"
@@ -387,14 +388,14 @@ $RX publish "$WORK/mathutils.rxpkg" --name=vlib --version=1.0.0 >/dev/null 2>&1
 $RX publish "$WORK/mathutils.rxpkg" --name=vlib --version=1.5.0 >/dev/null 2>&1
 $RX publish "$WORK/strutils.rxpkg" --name=vapp --version=1.0.0 --requires="vlib>=1.0.0" >/dev/null 2>&1
 unset RXPIP_TOKEN
-out=$($RX install vapp 2>&1)
+out=$($RX install --global vapp 2>&1)
 expect "installing vapp pulls its dependency" "$out" "installing vlib"
-$RX list 2>&1 | grep -q '^vlib  *1\.5\.0' && ok ">=1.0.0 installs the LATEST version, not exactly 1.0.0" || bad ">=1.0.0 installs the LATEST version, not exactly 1.0.0" "$($RX list 2>&1)"
+$RX list --global 2>&1 | grep -q '^vlib  *1\.5\.0' && ok ">=1.0.0 installs the LATEST version, not exactly 1.0.0" || bad ">=1.0.0 installs the LATEST version, not exactly 1.0.0" "$($RX list --global 2>&1)"
 printf '/* REQUIRE vlib>=2.0.0 */\nsay 1\n' > "$WORK/needs2.rexx"
 rm -rf "$RXPIP_HOME/pkgs" "$RXPIP_HOME/installed.txt" "$RXPIP_HOME/lib"/*
-expect "an unmet minimum is reported" "$($RX scan "$WORK/needs2.rexx" 2>&1)" "needs version >=2.0.0"
+expect "an unmet minimum is reported" "$($RX scan --global "$WORK/needs2.rexx" 2>&1)" "needs version >=2.0.0"
 printf '/* REQUIRE vlib>=1.2.0 */\nsay 1\n' > "$WORK/needs1.rexx"
-expect "a satisfiable minimum installs" "$($RX scan "$WORK/needs1.rexx" 2>&1)" "installing vlib 1.5.0"
+expect "a satisfiable minimum installs" "$($RX scan --global "$WORK/needs1.rexx" 2>&1)" "installing vlib 1.5.0"
 unset RXPIP_HOME
 
 # ============================================================================
