@@ -406,7 +406,7 @@ Action_Publish:
      no trace; dot-directories are never listed as packages */
   stagedir = root || '/.staging'
   call EnsureDir stagedir
-  stage = stagedir || '/upload_' || time('L') || '_' || random(1,99999) || '.tmp'
+  stage = stagedir || '/upload_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
   data = charin(, , clen)
   if length(data) \= clen then do
     call Fail 400, 'SHORT_BODY', 'received fewer bytes than Content-Length announced'
@@ -611,8 +611,8 @@ WriteNew: procedure
 ValidateArchive: procedure
   parse arg f
   nul = NullSink()
-  tn = TempDir() || '/rxpip_vn_' || time('L') || '_' || random(1,99999) || '.tmp'
-  tv = TempDir() || '/rxpip_vv_' || time('L') || '_' || random(1,99999) || '.tmp'
+  tn = TempDir() || '/rxpip_vn_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
+  tv = TempDir() || '/rxpip_vv_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
   'tar tzf "' || f || '" 2>' || nul || ' >"' || tn || '"'
   'tar tvzf "' || f || '" 2>' || nul || ' >"' || tv || '"'
   nn = 0
@@ -888,7 +888,7 @@ FileField: procedure
 /* atomically replace a file's content (write temp, then rename) */
 ReplaceFile: procedure
   parse arg file, content
-  tmp = file || '.tmp' || time('L') || random(1, 99999)
+  tmp = file || '.tmp' || translate(time('L'), '__', ':.') || random(1, 99999)
   call charout tmp, content
   call stream tmp, 'c', 'close'
   call MoveFile tmp, file
@@ -898,7 +898,7 @@ ReplaceFile: procedure
 DirBasesStr: procedure
   parse arg dir, suffix
   if \FileIsDir(dir) then return ''
-  tmp = TempDir() || '/rxpip_db_' || time('L') || '_' || random(1,99999) || '.tmp'
+  tmp = TempDir() || '/rxpip_db_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
   call ListDirNames dir, tmp
   out = ''
   do while lines(tmp) > 0
@@ -1155,7 +1155,7 @@ SendMail: procedure
   if \IsSafeEmail(from) | \IsSafeEmail(to) | \IsSafeMeta(subject, 200) then return 0
   cmd = value('RXPIP_SENDMAIL',,'ENVIRONMENT')
   if cmd = '' then cmd = '/usr/sbin/sendmail -t -i'
-  f = TempDir() || '/rxpip_mail_' || time('L') || '_' || random(1,99999) || '.tmp'
+  f = TempDir() || '/rxpip_mail_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
   msg = 'From: ' || from || '0a'x || 'To: ' || to || '0a'x || 'Subject: ' || subject || '0a'x ||,
         'Content-Type: text/plain; charset=utf-8' || '0a'x || '0a'x || body || '0a'x
   call charout f, msg
@@ -1658,7 +1658,7 @@ FileExists: procedure
 
 FileIsDir: procedure
   parse arg d
-  tmp = TempDir() || '/rxpip_isdir_' || time('L') || '_' || random(1,99999) || '.tmp'
+  tmp = TempDir() || '/rxpip_isdir_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
   if IsWindows() then do
     wd = translate(d, '\', '/')
     'if exist "' || wd || '\" (echo Y) else (echo N)' ' > "' || tmp || '"'
@@ -1840,7 +1840,7 @@ ListDirNames: procedure
 PackageNamesStr: procedure
   parse arg root
   call EnsureDir root
-  tmp = TempDir() || '/rxpip_ls_' || time('L') || '_' || random(1,99999) || '.tmp'
+  tmp = TempDir() || '/rxpip_ls_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
   call ListDirNames root, tmp
   out = ''
   do while lines(tmp) > 0
@@ -1858,7 +1858,7 @@ PackageNamesStr: procedure
 VersionsStr: procedure
   parse arg root, name
   pdir = root || '/' || name
-  tmp = TempDir() || '/rxpip_lsv_' || time('L') || '_' || random(1,99999) || '.tmp'
+  tmp = TempDir() || '/rxpip_lsv_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
   call ListDirNames pdir, tmp
   raw. = ''
   cnt = 0

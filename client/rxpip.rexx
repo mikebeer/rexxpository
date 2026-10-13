@@ -429,7 +429,7 @@ CmdRun: procedure expose home cfg.
     seen = InstallOne(word(reqs,i), seen)
   end
 
-  merged = home || '/run_' || time('L') || '_' || random(1,99999) || '.rexx'
+  merged = home || '/run_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.rexx'
   call MergeScript fn, home, merged
 
   interp = Interpreter()
@@ -437,7 +437,7 @@ CmdRun: procedure expose home cfg.
   if IsOoRexx() then do
     /* no 'rexx -a' in ooRexx: a small runner calls the merged program as an
        external routine with real separate arguments */
-    runner = home || '/runner_' || time('L') || '_' || random(1,99999) || '.rexx'
+    runner = home || '/runner_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.rexx'
     call charout runner, "f = value('RXPIP_RUN_FILE',,'ENVIRONMENT')" || '0a'x
     call charout runner, "s = value('RXPIP_RUN_ARGS',,'ENVIRONMENT')" || '0a'x
     call charout runner, "a = .array~new" || '0a'x
@@ -900,7 +900,7 @@ ServerGet: procedure
   parse arg repo, action, extra
   url = repo || '?action=' || action
   if extra \= '' then url = url || '&' || extra
-  tmp = TempDir() || '/rxpip_resp_' || time('L') || '_' || random(1,99999) || '.tmp'
+  tmp = TempDir() || '/rxpip_resp_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
   'curl -s -o "' || tmp || '" "' || url || '"'
   out = ''
   if FileExists(tmp) then do
@@ -934,7 +934,7 @@ ServerPost: procedure
   parse arg repo, action, extra, hdrs, secrets, bodyfile
   url = repo || '?action=' || action
   if extra \= '' then url = url || '&' || extra
-  uniq = time('L') || '_' || random(1,99999)
+  uniq = translate(time('L'), '__', ':.') || '_' || random(1,99999)
   hdrfile = TempDir() || '/rxpip_hdr_' || uniq || '.tmp'
   tmp = TempDir() || '/rxpip_post_' || uniq || '.tmp'
   if IsWindows() then do
@@ -1010,7 +1010,7 @@ PlatformTag: procedure expose cfg.
     else if arch = '' then arch = 'x86_64'
   end
   else do
-    tmp = TempDir() || '/rxpip_uname_' || time('L') || '_' || random(1,99999) || '.tmp'
+    tmp = TempDir() || '/rxpip_uname_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
     'uname -s > "' || tmp || '"'
     os = ''
     if FileExists(tmp) then do
@@ -1018,7 +1018,7 @@ PlatformTag: procedure expose cfg.
       call stream tmp, 'c', 'close'
     end
     call DelFile tmp
-    tmp = TempDir() || '/rxpip_arch_' || time('L') || '_' || random(1,99999) || '.tmp'
+    tmp = TempDir() || '/rxpip_arch_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
     'uname -m > "' || tmp || '"'
     arch = ''
     if FileExists(tmp) then do
