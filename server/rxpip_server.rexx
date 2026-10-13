@@ -99,12 +99,14 @@ select
   when action = 'SIGNUP'   then call Web_Signup AUTH_DIR, method_, clen
   when action = 'REVIEW'   then call Web_Review AUTH_DIR, method_, clen, qstring
   when action = 'PING'     then call Action_Ping
-  when action = 'LIST'     then call Action_List     REPO_ROOT
-  when action = 'SEARCH'   then call Action_Search    REPO_ROOT, qstring
-  when action = 'INFO'     then call Action_Info      REPO_ROOT, qstring
-  when action = 'VERSIONS' then call Action_Versions  REPO_ROOT, qstring
-  when action = 'ARTIFACTS' then call Action_Artifacts REPO_ROOT, qstring
-  when action = 'DOWNLOAD' then call Action_Download  REPO_ROOT, qstring
+  when action = 'LIST'     then call Action_List     REPO_ROOT, AUTH_DIR
+  when action = 'SEARCH'   then call Action_Search    REPO_ROOT, AUTH_DIR, qstring
+  when action = 'INFO'     then call Action_Info      REPO_ROOT, AUTH_DIR, qstring
+  when action = 'VERSIONS' then call Action_Versions  REPO_ROOT, AUTH_DIR, qstring
+  when action = 'ARTIFACTS' then call Action_Artifacts REPO_ROOT, AUTH_DIR, qstring
+  when action = 'DOWNLOAD' then call Action_Download  REPO_ROOT, AUTH_DIR, qstring
+  when action = 'VISIBILITY' then call Action_Visibility AUTH_DIR, method_
+  when action = 'READERS' | action = 'ADDREADER' | action = 'REMOVEREADER' then call Action_Readers AUTH_DIR, method_, action
   when action = 'REGISTER' then call Action_Register  AUTH_DIR, method_
   when action = 'WHOAMI'   then call Action_Whoami    AUTH_DIR, method_
   when action = 'NEWTOKEN' then call Action_NewToken  AUTH_DIR, method_
@@ -133,9 +135,11 @@ Action_Ping: procedure
   return
 
 Action_List:
-  parse arg root
+  parse arg root, authdir
+  viewer = Viewer(authdir)
+  if \ReadGate(viewer) then return
   call TextHeader
-  names = PackageNamesStr(root)
+  names = VisibleNames(root, authdir, viewer)
   n = words(names)
   say 'STATUS: OK'
   say 'COUNT:' n
@@ -149,10 +153,12 @@ Action_List:
   return
 
 Action_Search:
-  parse arg root, qstring
+  parse arg root, authdir, qstring
+  viewer = Viewer(authdir)
+  if \ReadGate(viewer) then return
   call TextHeader
   term = translate(QGet(qstring, 'Q'))
-  names = PackageNamesStr(root)
+  names = VisibleNames(root, authdir, viewer)
   n = words(names)
   say 'STATUS: OK'
   hitlist = ''
@@ -179,7 +185,9 @@ Action_Search:
   return
 
 Action_Info:
-  parse arg root, qstring
+  parse arg root, authdir, qstring
+  viewer = Viewer(authdir)
+  if \ReadGate(viewer) then return
   call TextHeader
   name = QGet(qstring, 'NAME')
   if \IsSafeToken(name) then do
@@ -192,18 +200,21 @@ Action_Info:
     return
   end
   if ver = '' then ver = LatestVersionOf(root, name)
-  if ver = '' | \FileExists(MetaPath(root,name,ver)) then do
+  if ver = '' | \FileExists(MetaPath(root,name,ver)) | \CanRead(authdir, viewer, name) then do
     call ErrorBody 'NOT_FOUND', "package '" || name || "' not found"
     return
   end
   say 'STATUS: OK'
   say 'COUNT: 1'
+  if IsPrivate(authdir, name) then say 'VISIBILITY: private'
   say ''
   call EmitStanza MetaStr(root, name, ver)
   return
 
 Action_Versions:
-  parse arg root, qstring
+  parse arg root, authdir, qstring
+  viewer = Viewer(authdir)
+  if \ReadGate(viewer) then return
   call TextHeader
   name = QGet(qstring, 'NAME')
   if \IsSafeToken(name) then do
@@ -211,6 +222,7 @@ Action_Versions:
     return
   end
   vs = VersionsStr(root, name)
+  if \CanRead(authdir, viewer, name) then vs = ''
   say 'STATUS: OK'
   say 'COUNT:' words(vs)
   say ''
@@ -220,7 +232,9 @@ Action_Versions:
   return
 
 Action_Artifacts:
-  parse arg root, qstring
+  parse arg root, authdir, qstring
+  viewer = Viewer(authdir)
+  if \ReadGate(viewer) then return
   call TextHeader
   name = QGet(qstring, 'NAME')
   if \IsSafeToken(name) then do
@@ -233,7 +247,7 @@ Action_Artifacts:
     return
   end
   if ver = '' then ver = LatestVersionOf(root, name)
-  if ver = '' then do
+  if ver = '' | \CanRead(authdir, viewer, name) then do
     call ErrorBody 'NOT_FOUND', "package '" || name || "' not found"
     return
   end
@@ -260,7 +274,9 @@ Action_Artifacts:
   return
 
 Action_Download:
-  parse arg root, qstring
+  parse arg root, authdir, qstring
+  viewer = Viewer(authdir)
+  if \ReadGate(viewer) then return
   name = QGet(qstring, 'NAME')
   if \IsSafeToken(name) then do
     call Fail 400, 'BAD_NAME', 'invalid package name'
@@ -281,7 +297,7 @@ Action_Download:
     return
   end
   artfile = ArtifactPath(root, name, ver, kind, platform)
-  if ver = '' | \FileExists(artfile) then do
+  if ver = '' | \FileExists(artfile) | \CanRead(authdir, viewer, name) then do
     call Fail 404, 'NOT_FOUND', "no " || kind || "/" || platform || " artifact for '" || name || "' " || ver
     return
   end
@@ -331,6 +347,7 @@ Action_Publish:
   kind     = translate(strip(kind))
   platform = HdrOrQuery('HTTP_X_RXPIP_PLATFORM', qstring, 'PLATFORM')
   if platform = '' then platform = 'any'
+  vis      = lower(strip(HdrOrQuery('HTTP_X_RXPIP_VISIBILITY', qstring, 'VISIBILITY')))
   token    = value('HTTP_X_RXPIP_TOKEN',,'ENVIRONMENT')
 
   if \IsSafeToken(name) then do
@@ -355,6 +372,10 @@ Action_Publish:
   end
   if \IsSafeRequires(requires) then do
     call Fail 400, 'BAD_REQUIRES', 'requires must be space/comma separated "name" or "name>=version" entries'
+    return
+  end
+  if vis \= '' & vis \= 'public' & vis \= 'private' then do
+    call Fail 400, 'BAD_VISIBILITY', 'visibility must be public or private'
     return
   end
   if token = '' then do
@@ -394,6 +415,27 @@ Action_Publish:
     end
   end
   else claiming = 1
+
+  /* a public package must not depend on a private one: anonymous users
+     could not install it. (Not checked in a closed repository, where
+     every read needs a token anyway.) */
+  finalvis = vis
+  if finalvis = '' then do
+    finalvis = 'public'
+    if IsPrivate(authdir, name) then finalvis = 'private'
+  end
+  if finalvis = 'public' & \IsClosed() then do
+    rq = translate(requires, ' ', ',')
+    do i = 1 to words(rq)
+      parse value word(rq, i) with rn '>=' .
+      if IsSafeToken(rn) then do
+        if IsPrivate(authdir, rn) then do
+          call Fail 409, 'PRIVATE_DEPENDENCY', "a public package cannot require the private package '" || rn || "' - publish with visibility private, or make '" || rn || "' public"
+          return
+        end
+      end
+    end
+  end
 
   artfile = ArtifactPath(root, name, ver, kind, platform)
   if FileExists(artfile) then do
@@ -436,6 +478,9 @@ Action_Publish:
     end
   end
 
+  /* set visibility BEFORE the artifact appears, so a private package is
+     never readable even for a moment */
+  if claiming | vis \= '' then call SetVisibility authdir, name, finalvis
   call EnsureDir root || '/' || name || '/' || ver || '/artifacts'
   call MoveFile stage, artfile
   call WriteArtifactRecord root, name, ver, kind, platform, filelist
@@ -748,12 +793,21 @@ HtmlFooter: procedure
 Web_Home: procedure
   parse arg root, authdir, qstring
   self = Esc(value('SCRIPT_NAME',,'ENVIRONMENT'))
+  viewer = Viewer(authdir)
+  if IsClosed() & viewer = '' then do
+    call HtmlHeader 200, 'rexxpository'
+    say '<h1>Private repository</h1>'
+    say '<p>This repository is private. The rxpip client shows its packages once you are logged in (<code>rxpip login</code>).</p>'
+    if SignupEnabled() then say '<p><a href="' || self || '?action=SIGNUP">Request an account</a></p>'
+    call HtmlFooter
+    return
+  end
   q = QGet(qstring, 'Q')
   if \IsSafeMeta(q, 100) then q = ''
   call HtmlHeader 200, 'rexxpository'
   say '<h1>Packages</h1>'
   say '<form method="get" action="' || self || '"><input type="search" name="q" value="' || Esc(q) || '" placeholder="Search packages" aria-label="Search packages"><button type="submit">Search</button></form>'
-  names = PackageNamesStr(root)
+  names = VisibleNames(root, authdir, viewer)
   term = translate(q)
   shown = 0
   rows = ''
@@ -781,6 +835,7 @@ Web_Home: procedure
 Web_Package: procedure
   parse arg root, authdir, qstring
   self = Esc(value('SCRIPT_NAME',,'ENVIRONMENT'))
+  viewer = Viewer(authdir)
   name = QGet(qstring, 'NAME')
   ver = QGet(qstring, 'VERSION')
   if \IsSafeToken(name) | (ver \= '' & \IsSafeVersion(ver)) then do
@@ -790,7 +845,7 @@ Web_Package: procedure
     return
   end
   if ver = '' then ver = LatestVersionOf(root, name)
-  if ver = '' | \FileExists(MetaPath(root, name, ver)) then do
+  if ver = '' | \FileExists(MetaPath(root, name, ver)) | \CanRead(authdir, viewer, name) then do
     call HtmlHeader 404, 'Not found'
     say '<h1>Not found</h1><p>No such package or version. <a href="' || self || '">Browse all packages</a>.</p>'
     call HtmlFooter
@@ -843,6 +898,173 @@ Web_Package: procedure
   end
   say '</p>'
   call HtmlFooter
+  return
+
+/* =======================================================================
+   VISIBILITY  (private packages) and the CLOSED repository
+   -----------------------------------------------------------------------
+   Per package, under AUTH_DIR (never served):
+     visibility/<pkg>.vis   exists and says "private" -> not public
+     readers/<pkg>.readers  users who may READ a private package (owners
+                            always may) -- one username per line
+   RXPIP_CLOSED=1 makes the whole repository private: every read action
+   needs a valid token. Reads carry the token in the X-Rxpip-Token header.
+   A private package is answered exactly like a package that does not
+   exist, so its name cannot be probed.
+   ======================================================================= */
+IsClosed: procedure
+  return value('RXPIP_CLOSED',,'ENVIRONMENT') = '1'
+
+/* the user behind the X-Rxpip-Token header of a read request, or '' */
+Viewer: procedure
+  parse arg authdir
+  token = value('HTTP_X_RXPIP_TOKEN',,'ENVIRONMENT')
+  if token = '' then return ''
+  if \IsSafeSecret(token) then return ''
+  if Sha256Hex('rxpip') = '' then return ''
+  return AuthUser(authdir, token)
+
+/* closed repository without a valid token: answer 401 and say no */
+ReadGate: procedure
+  parse arg viewer
+  if IsClosed() & viewer = '' then do
+    call Fail 401, 'NO_TOKEN', 'this repository is private: send a valid token (rxpip login)'
+    return 0
+  end
+  return 1
+
+IsPrivate: procedure
+  parse arg authdir, pkg
+  f = authdir || '/visibility/' || pkg || '.vis'
+  if \FileExists(f) then return 0
+  return pos('private', Lower(FileField(f, 'VISIBILITY'))) > 0
+
+SetVisibility: procedure
+  parse arg authdir, pkg, v
+  f = authdir || '/visibility/' || pkg || '.vis'
+  if v = 'private' then do
+    call EnsureDir authdir || '/visibility'
+    call ReplaceFile f, 'VISIBILITY: private' || '0a'x
+  end
+  else call DelFile f
+  return
+
+ReadersStr: procedure
+  parse arg authdir, pkg
+  f = authdir || '/readers/' || pkg || '.readers'
+  out = ''
+  if FileExists(f) then do
+    do while lines(f) > 0
+      l = strip(linein(f))
+      if l \= '' then out = out l
+    end
+    call stream f, 'c', 'close'
+  end
+  return strip(out)
+
+WriteReaders: procedure
+  parse arg authdir, pkg, list
+  call EnsureDir authdir || '/readers'
+  c = ''
+  do i = 1 to words(list)
+    c = c || word(list, i) || '0a'x
+  end
+  if c = '' then call DelFile authdir || '/readers/' || pkg || '.readers'
+  else call ReplaceFile authdir || '/readers/' || pkg || '.readers', c
+  return
+
+/* may viewer ('' = anonymous) read package pkg? */
+CanRead: procedure
+  parse arg authdir, viewer, pkg
+  if IsClosed() & viewer = '' then return 0
+  if \IsPrivate(authdir, pkg) then return 1
+  if viewer = '' then return 0
+  if IsOwner(authdir, pkg, viewer) then return 1
+  return wordpos(viewer, ReadersStr(authdir, pkg)) > 0
+
+/* the package names this viewer may see */
+VisibleNames: procedure
+  parse arg root, authdir, viewer
+  all = PackageNamesStr(root)
+  out = ''
+  do i = 1 to words(all)
+    if CanRead(authdir, viewer, word(all, i)) then out = out word(all, i)
+  end
+  return strip(out)
+
+/* POST: set a package's visibility (owners only) */
+Action_Visibility: procedure
+  parse arg authdir, method_
+  u = Authenticate(authdir, method_)
+  if u = '' then return
+  qs = value('QUERY_STRING',,'ENVIRONMENT')
+  name = HdrOrQuery('HTTP_X_RXPIP_NAME', qs, 'NAME')
+  v = Lower(strip(HdrOrQuery('HTTP_X_RXPIP_VALUE', qs, 'VALUE')))
+  if \IsSafeToken(name) then do
+    call Fail 400, 'BAD_NAME', 'invalid package name'
+    return
+  end
+  if v \= 'public' & v \= 'private' then do
+    call Fail 400, 'BAD_VISIBILITY', 'value must be public or private'
+    return
+  end
+  if \IsOwner(authdir, name, u) then do
+    call Fail 404, 'NOT_FOUND', "package '" || name || "' not found"
+    return
+  end
+  call SetVisibility authdir, name, v
+  call TextHeader
+  say 'STATUS: OK'
+  say 'NAME:' name
+  say 'VISIBILITY:' v
+  return
+
+/* POST: READERS (list), ADDREADER, REMOVEREADER -- owners only */
+Action_Readers: procedure
+  parse arg authdir, method_, act
+  u = Authenticate(authdir, method_)
+  if u = '' then return
+  qs = value('QUERY_STRING',,'ENVIRONMENT')
+  name = HdrOrQuery('HTTP_X_RXPIP_NAME', qs, 'NAME')
+  target = HdrOrQuery('HTTP_X_RXPIP_USER', qs, 'USER')
+  if \IsSafeToken(name) then do
+    call Fail 400, 'BAD_NAME', 'invalid package name'
+    return
+  end
+  if \IsOwner(authdir, name, u) then do
+    call Fail 404, 'NOT_FOUND', "package '" || name || "' not found"
+    return
+  end
+  readers = ReadersStr(authdir, name)
+  if act = 'ADDREADER' | act = 'REMOVEREADER' then do
+    if \IsSafeUser(target) then do
+      call Fail 400, 'BAD_USER', 'invalid username'
+      return
+    end
+    if act = 'ADDREADER' then do
+      if \UserExists(authdir, target) then do
+        call Fail 404, 'NO_SUCH_USER', "no such user '" || target || "'"
+        return
+      end
+      if wordpos(target, readers) = 0 then readers = readers target
+    end
+    else do
+      p = wordpos(target, readers)
+      if p = 0 then do
+        call Fail 404, 'NOT_A_READER', "'" || target || "' is not a reader of '" || name || "'"
+        return
+      end
+      readers = delword(readers, p, 1)
+    end
+    call WriteReaders authdir, name, strip(readers)
+    readers = ReadersStr(authdir, name)
+  end
+  call TextHeader
+  say 'STATUS: OK'
+  say 'NAME:' name
+  if IsPrivate(authdir, name) then say 'VISIBILITY: private'
+  else say 'VISIBILITY: public'
+  say 'READERS:' readers
   return
 
 /* =======================================================================
@@ -1427,13 +1649,15 @@ Action_Revoke: procedure
 
 Action_Owners: procedure
   parse arg authdir, qstring
+  viewer = Viewer(authdir)
+  if \ReadGate(viewer) then return
   name = QGet(qstring, 'NAME')
   if \IsSafeToken(name) then do
     call Fail 400, 'BAD_NAME', 'invalid package name'
     return
   end
   o = OwnersStr(authdir, name)
-  if o = '' then do
+  if o = '' | \CanRead(authdir, viewer, name) then do
     call Fail 404, 'NOT_FOUND', "no owners recorded for '" || name || "'"
     return
   end
@@ -1561,6 +1785,14 @@ AdminMain: procedure
       say 'revoked' words(ids) 'token(s) of' p1
     end
     when sub = 'OWNERS' then say p1 || ':' OwnersStr(authdir, p1)
+    when sub = 'VISIBILITY' then do  /* visibility <pkg> [public|private] */
+      if \IsSafeToken(p1) then do; say 'rxpip-admin: usage: visibility <pkg> [public|private]'; return 1; end
+      v = lower(strip(p2))
+      if v = 'public' | v = 'private' then call SetVisibility authdir, p1, v
+      else if v \= '' then do; say 'rxpip-admin: value must be public or private'; return 1; end
+      if IsPrivate(authdir, p1) then say p1 || ': private, readers:' ReadersStr(authdir, p1)
+      else say p1 || ': public'
+    end
     when sub = 'SETOWNERS' then do   /* setowners <pkg> <user>...  (recovery) */
       list = rest
       if \IsSafeToken(p1) | list = '' then do; say 'rxpip-admin: usage: setowners <pkg> <user> [<user>...]'; return 1; end
@@ -1580,6 +1812,7 @@ AdminMain: procedure
       say '  revoke <token-id>        revoke one token'
       say '  lock <user>              revoke all of a user''s tokens'
       say '  owners <pkg>             show owners'
+      say '  visibility <pkg> [public|private]   show / set a package''s visibility'
       say '  setowners <pkg> <u>...   replace the owner list (account recovery)'
     end
   end

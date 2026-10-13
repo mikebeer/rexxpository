@@ -479,6 +479,90 @@ expect "rejected request is gone" "$(curl -s "$LINK2")" "invalid, expired"
 expect "home page links to sign-up" "$(curl -s "$BASE")" "request an account"
 
 # ============================================================================
+section "private packages"
+# reads carry the token in X-Rxpip-Token; a private package answers like a missing one
+getT() { local tok=$1; shift; curl -s ${tok:+-H "X-Rxpip-Token: $tok"} "$BASE?$1"; }
+pub secretlib 1.0.0 "$TOKA" "$WORK/mathutils.rxpkg" -H "X-Rxpip-Visibility: private"
+expect "publishing as private works" "$BODY" "MESSAGE: published"
+expect_not "anonymous LIST does not show it" "$(getT "" action=LIST)" "secretlib"
+expect "the owner's LIST shows it" "$(getT "$TOKA" action=LIST)" "secretlib"
+expect_not "another user's LIST does not show it" "$(getT "$TOKB" action=LIST)" "secretlib"
+expect_not "anonymous SEARCH does not find it" "$(getT "" 'action=SEARCH&q=secret')" "secretlib"
+expect "the owner's SEARCH finds it" "$(getT "$TOKA" 'action=SEARCH&q=secret')" "secretlib"
+a=$(getT "" 'action=INFO&name=secretlib'); b=$(getT "" 'action=INFO&name=nosuchpkg')
+expect "anonymous INFO: private looks like missing" "$a" "NOT_FOUND"
+[ "${a//secretlib/X}" = "${b//nosuchpkg/X}" ] && ok "private and missing answers are identical" || bad "private and missing answers are identical" "$a / $b"
+expect "owner INFO works and says private" "$(getT "$TOKA" 'action=INFO&name=secretlib')" "VISIBILITY: private"
+expect "VERSIONS hidden from anonymous" "$(getT "" 'action=VERSIONS&name=secretlib')" "COUNT: 0"
+expect "ARTIFACTS hidden from anonymous" "$(getT "" 'action=ARTIFACTS&name=secretlib')" "NOT_FOUND"
+c=$(curl -s -o /dev/null -w '%{http_code}' "$BASE?action=DOWNLOAD&name=secretlib&version=1.0.0")
+[ "$c" = 404 ] && ok "anonymous DOWNLOAD is 404" || bad "anonymous DOWNLOAD is 404" "got $c"
+c=$(curl -s -o /dev/null -w '%{http_code}' -H "X-Rxpip-Token: $TOKB" "$BASE?action=DOWNLOAD&name=secretlib&version=1.0.0")
+[ "$c" = 404 ] && ok "a stranger's DOWNLOAD is 404" || bad "a stranger's DOWNLOAD is 404" "got $c"
+c=$(curl -s -o /dev/null -w '%{http_code}' -H "X-Rxpip-Token: $TOKA" "$BASE?action=DOWNLOAD&name=secretlib&version=1.0.0")
+[ "$c" = 200 ] && ok "the owner can DOWNLOAD" || bad "the owner can DOWNLOAD" "got $c"
+expect "OWNERS hidden from anonymous" "$(getT "" 'action=OWNERS&name=secretlib')" "NOT_FOUND"
+expect_not "web home hides it" "$(curl -s "$BASE")" "secretlib"
+expect "web package page is 404 for anonymous" "$(curl -s "$BASE?action=PKG&name=secretlib")" "Not found"
+expect "a garbage token is just anonymous" "$(getT "rxp_00000000_000000000000000000000000000000000000000000000000" action=LIST)" "COUNT:"
+expect_not "a garbage token does not see it" "$(getT "rxp_00000000_000000000000000000000000000000000000000000000000" action=LIST)" "secretlib"
+
+api ADDREADER "$TOKA" -H "X-Rxpip-Name: secretlib" -H "X-Rxpip-User: bob"
+expect "owner adds a reader" "$BODY" "READERS: bob"
+expect "the reader sees the package" "$(getT "$TOKB" action=LIST)" "secretlib"
+c=$(curl -s -o /dev/null -w '%{http_code}' -H "X-Rxpip-Token: $TOKB" "$BASE?action=DOWNLOAD&name=secretlib&version=1.0.0")
+[ "$c" = 200 ] && ok "the reader can DOWNLOAD" || bad "the reader can DOWNLOAD" "got $c"
+api ADDREADER "$TOKB" -H "X-Rxpip-Name: secretlib" -H "X-Rxpip-User: carol"
+expect "a reader cannot add readers" "$BODY" "NOT_FOUND"
+api REMOVEREADER "$TOKA" -H "X-Rxpip-Name: secretlib" -H "X-Rxpip-User: bob"
+expect_not "owner removes the reader" "$BODY" "READERS: bob"
+expect_not "the former reader no longer sees it" "$(getT "$TOKB" action=LIST)" "secretlib"
+api READERS "$TOKA" -H "X-Rxpip-Name: secretlib"
+expect "READERS lists visibility" "$BODY" "VISIBILITY: private"
+api READERS "$TOKB" -H "X-Rxpip-Name: secretlib"
+expect "a stranger cannot list readers" "$BODY" "NOT_FOUND"
+
+pub openlib 1.0.0 "$TOKA" "$WORK/strutils.rxpkg" -H "X-Rxpip-Requires: secretlib"
+expect "a public package cannot require a private one" "$BODY" "PRIVATE_DEPENDENCY"
+pub privapp 1.0.0 "$TOKA" "$WORK/strutils.rxpkg" -H "X-Rxpip-Requires: secretlib" -H "X-Rxpip-Visibility: private"
+expect "a private package may require a private one" "$BODY" "MESSAGE: published"
+pub badvis 1.0.0 "$TOKA" "$WORK/strutils.rxpkg" -H "X-Rxpip-Visibility: secret"
+expect "an invalid visibility is refused" "$BODY" "BAD_VISIBILITY"
+
+api VISIBILITY "$TOKB" -H "X-Rxpip-Name: secretlib" -H "X-Rxpip-Value: public"
+expect "only an owner can change visibility" "$BODY" "NOT_FOUND"
+api VISIBILITY "$TOKA" -H "X-Rxpip-Name: secretlib" -H "X-Rxpip-Value: public"
+expect "owner makes it public" "$BODY" "VISIBILITY: public"
+expect "now anonymous LIST shows it" "$(getT "" action=LIST)" "secretlib"
+api VISIBILITY "$TOKA" -H "X-Rxpip-Name: secretlib" -H "X-Rxpip-Value: private"
+expect_not "and private again hides it" "$(getT "" action=LIST)" "secretlib"
+expect "admin visibility shows it" "$(adm visibility secretlib)" "secretlib: private"
+
+# ============================================================================
+section "closed repository (RXPIP_CLOSED=1)"
+CPORT=$((PORT+1))
+RXPIP_CLOSED=1 python3 "$ROOT/tests/cgi_harness.py" --port "$CPORT" \
+  --script "$ROOT/server/rxpip_server.rexx" --repo "$REPO" &
+CPID=$!
+CBASE=http://127.0.0.1:$CPORT/cgi-bin/rxpip_server.rexx
+for _ in $(seq 1 50); do curl -s "$CBASE?action=PING" 2>/dev/null | grep -q "STATUS: OK" && break; sleep 0.1; done
+cg() { local tok=$1; shift; curl -s ${tok:+-H "X-Rxpip-Token: $tok"} "$CBASE?$1"; }
+expect "PING stays open" "$(cg "" action=PING)" "STATUS: OK"
+expect "anonymous LIST is refused" "$(cg "" action=LIST)" "NO_TOKEN"
+expect "anonymous SEARCH is refused" "$(cg "" 'action=SEARCH&q=')" "NO_TOKEN"
+expect "anonymous INFO is refused" "$(cg "" 'action=INFO&name=mathutils')" "NO_TOKEN"
+c=$(curl -s -o /dev/null -w '%{http_code}' "$CBASE?action=DOWNLOAD&name=mathutils&version=1.0.0")
+[ "$c" = 401 ] && ok "anonymous DOWNLOAD is 401" || bad "anonymous DOWNLOAD is 401" "got $c"
+expect "any valid token can read public packages" "$(cg "$TOKB" action=LIST)" "mathutils"
+expect_not "but still not another user's private ones" "$(cg "$TOKB" action=LIST)" "secretlib"
+expect "the owner still sees their private package" "$(cg "$TOKA" action=LIST)" "secretlib"
+expect "a garbage token is refused" "$(cg "rxp_00000000_000000000000000000000000000000000000000000000000" action=LIST)" "NO_TOKEN"
+expect "web home says the repository is private" "$(curl -s "$CBASE")" "Private repository"
+expect_not "web home lists nothing" "$(curl -s "$CBASE")" "mathutils"
+expect "sign-up stays reachable" "$(curl -s "$CBASE?action=SIGNUP")" "<form"
+kill $CPID 2>/dev/null
+
+# ============================================================================
 echo
 echo "passed: $PASS   failed: $FAIL"
 [ "$FAIL" = 0 ]
