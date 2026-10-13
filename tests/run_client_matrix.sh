@@ -108,6 +108,10 @@ run_client() {
   out=$(cd "$d" && $RX run "$ARGP" "one two" three 2>&1)
   expect "run forwards an argument with a space" "$out" "= [one two]"
   expect "run forwards the next argument" "$out" "= [three]"
+  if [ "$plat" = any ]; then
+    out=$(cd "$d" && $RX build "$PROG" --output="$d/built.out" 2>&1); expect "build with REQUIRE lines writes a program" "$out" "wrote self-contained program"
+    grep -q "Twice" "$d/built.out" && ok "the built program contains the package" || bad "the built program contains the package" "$(head -5 "$d/built.out")"
+  fi
   out=$($RX scan "$PROG" 2>&1);                 expect "scan reads REQUIRE" "$out" "already installed"
   out=$($RX uninstall m2$c 2>&1);               expect "uninstall" "$out" "removed m2$c"
   out=$($RX list 2>&1);                         expect_not "uninstalled package is gone" "$out" "m2$c"

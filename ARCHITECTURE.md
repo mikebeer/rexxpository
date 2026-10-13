@@ -456,7 +456,22 @@ scope), `StoreExists`/`StoreCopyIn`/`StoreDelete`/`StoreMake` (package
 files). The registry (find, remove, record, summary) works on the record
 text only. A new environment supplies these routines and `SetScope`.
 
-### VM/370plus (planned — skeleton only)
+### VM/370plus
+
+*Existing route.* mikebeer/vm370plus (`arch/31bit/linux390/rxpip`) already
+serves CMS users through a spool bridge: `RXPIP.EXEC` on CMS sends a
+request to a vmspoold service in the Debian guest, which runs this
+Regina client against a local repository and returns the merged program
+(`RXPIP BUILD/RUN`) or the package sources (`RXPIP GET`) as CMS files. The
+bridge handler calls `rxpip install` for `GET`; with install-to-current-
+directory as the default it should call `rxpip install --global`, or the
+packages also land in the service's working directory.
+
+*Native route (below).* If a REXX on CMS should ever run the client
+itself, the storage section already has the hooks. The skeleton is
+untested and may never be needed while the bridge works.
+
+### Planned native CMS backend (skeleton only)
 
 The target has no directories, file names of at most 8.8 characters
 (name, type), and uses GLOBALV like an ini file. BREXX and cREXX run
