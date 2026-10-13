@@ -278,14 +278,14 @@ InstallOne: procedure expose home cfg.
   if \cfg.FORCEOW then do
     do i = 1 to words(files)
       fn = word(files, i)
-      if FileExists(cfg.TGTDIR || '/' || fn) & wordpos(fn, oldfiles) = 0 then do
+      if StoreExists(cfg.TGTDIR, fn) & wordpos(fn, oldfiles) = 0 then do
         say "rxpip: '" || cfg.TGTDIR || '/' || fn || "' already exists and was not installed by rxpip; use --force to overwrite"
         return seen
       end
     end
   end
   do i = 1 to words(oldfiles)
-    call DelFile cfg.TGTDIR || '/' || word(oldfiles, i)
+    call StoreDelete cfg.TGTDIR, word(oldfiles, i)
   end
 
   pkgdir = home || '/pkgs/' || name || '/' || ver
@@ -294,11 +294,10 @@ InstallOne: procedure expose home cfg.
 
   /* flatten: copy every package file (any extension: .rexx, .rex, ...) into the shared lib/ dir so that
      unqualified CALLs resolve for `rxpip run` */
-  call EnsureDir cfg.TGTDIR
-  call EnsureDir cfg.RECDIR
+  call StoreMake cfg.TGTDIR
   do i = 1 to words(files)
     fn = word(files, i)
-    call CopyFile pkgdir || '/' || fn, cfg.TGTDIR || '/' || fn
+    call StoreCopyIn pkgdir, cfg.TGTDIR, fn
   end
 
   call RecordInstalled cfg.RECDIR, name, ver, author, summary, requires, files
@@ -325,6 +324,22 @@ InstallOne: procedure expose home cfg.
    cfg.ISGLOBAL = 1 for the shared store */
 SetScope: procedure expose cfg. home
   parse arg mode, dir
+  if IsCms() then do
+    /* VM/370plus: the "directory" is a minidisk filemode; the shared
+       store is the one named by LIB_DIR in the config (default A) */
+    if mode = 'GLOBAL' then do
+      cfg.ISGLOBAL = 1
+      dir = left(cfg.LIB_DIR, 1)
+    end
+    else do
+      cfg.ISGLOBAL = 0
+      if dir = '' then dir = 'A'
+    end
+    if dir = '' | dir = '/' then dir = 'A'
+    cfg.TGTDIR = translate(left(dir,1))
+    cfg.RECDIR = 'CMS:' || cfg.TGTDIR
+    return
+  end
   if mode = 'GLOBAL' then do
     cfg.ISGLOBAL = 1
     cfg.TGTDIR = home || '/lib'
@@ -366,6 +381,10 @@ ParseScope: procedure expose cfg. home
    versions; --sync upgrades older copies to the newest version found */
 CmdFind: procedure expose home cfg.
   parse arg all
+  if IsCms() then do
+    say 'rxpip: find is not available on CMS yet'
+    return
+  end
   sync = 0
   dupnames = ''
   roots = ''
@@ -406,21 +425,16 @@ CmdFind: procedure expose home cfg.
   do while rest \= ''
     parse var rest d '0a'x rest
     if d = '' then iterate
-    idx = d || '/installed.txt'
-    if \FileExists(idx) then iterate
-    do while lines(idx) > 0
-      l = linein(idx)
-      if left(l,5) = 'NAME:' then nm = strip(substr(l,6))
-      if left(l,8) = 'VERSION:' then do
-        n = n + 1
-        ename.n = nm
-        ever.n = strip(substr(l,9))
-        edir.n = d
-        if best.nm = '' then best.nm = ever.n
-        else if CompareVersions(ever.n, best.nm) > 0 then best.nm = ever.n
-      end
+    sm = RecSummary(d)
+    do while sm \= ''
+      parse var sm nm '01'x ver '01'x su '0a'x sm
+      n = n + 1
+      ename.n = nm
+      ever.n = ver
+      edir.n = d
+      if best.nm = '' then best.nm = ver
+      else if CompareVersions(ver, best.nm) > 0 then best.nm = ver
     end
-    call stream idx, 'c', 'close'
   end
   if n = 0 then do
     say '(no rxpip installs found)'
@@ -507,7 +521,7 @@ CmdUninstall: procedure expose home cfg.
   files = StanzaFieldPlain(rec, 'FILES')
   do i = 1 to words(files)
     fn = word(files, i)
-    call DelFile cfg.TGTDIR || '/' || fn
+    call StoreDelete cfg.TGTDIR, fn
   end
   if cfg.ISGLOBAL then call DelTree home || '/pkgs/' || name
   call RemoveInstalledRecord cfg.RECDIR, name
@@ -515,29 +529,17 @@ CmdUninstall: procedure expose home cfg.
   return
 
 CmdList: procedure expose home cfg.
-  idx = cfg.RECDIR || '/installed.txt'
-  if \FileExists(idx) then do
+  sm = RecSummary(cfg.RECDIR)
+  if sm = '' then do
     say '(no packages installed)'
     return
   end
   say left('NAME',20) left('VERSION',12) 'SUMMARY'
   say copies('-', 60)
-  do while lines(idx) > 0
-    l = linein(idx)
-    if left(l,5) = 'NAME:' then do
-      nm = strip(substr(l,6))
-      vl = linein(idx)
-      ver = strip(substr(vl,9))
-      al  = linein(idx)
-      sl  = linein(idx)
-      sm  = strip(substr(sl,9))
-      rl  = linein(idx)
-      fl  = linein(idx)
-      bl  = linein(idx)
-      say left(nm,20) left(ver,12) sm
-    end
+  do while sm \= ''
+    parse var sm nm '01'x ver '01'x su '0a'x sm
+    say left(nm,20) left(ver,12) su
   end
-  call stream idx, 'c', 'close'
   return
 
 CmdSearch: procedure expose cfg.
@@ -573,17 +575,11 @@ CmdShow: procedure expose cfg.
   return
 
 CmdFreeze: procedure expose home cfg.
-  idx = cfg.RECDIR || '/installed.txt'
-  if \FileExists(idx) then return
-  do while lines(idx) > 0
-    l = linein(idx)
-    if left(l,5) = 'NAME:' then nm = strip(substr(l,6))
-    if left(l,8) = 'VERSION:' then do
-      ver = strip(substr(l,9))
-      say nm || '==' || ver
-    end
+  sm = RecSummary(cfg.RECDIR)
+  do while sm \= ''
+    parse var sm nm '01'x ver '01'x su '0a'x sm
+    say nm || '==' || ver
   end
-  call stream idx, 'c', 'close'
   return
 
 CmdScan: procedure expose home cfg.
@@ -1052,84 +1048,186 @@ SetConfigValue: procedure
   return
 
 /* =======================================================================
-   INSTALLED-PACKAGE REGISTRY  (home/installed.txt, stanza format)
+   STORAGE BACKENDS and INSTALLED-PACKAGE REGISTRY
+
+   Everything that knows WHERE packages live is in this section, so a
+   different environment only has to supply these few routines:
+
+     RecLoad(rec)            whole record text of a scope ('' if none)
+     RecSave(rec, text)      replace it ('' removes it)
+     StoreExists(tgt, fn)    does package file fn exist in the target?
+     StoreCopyIn(src, tgt, fn)   copy a file from the unpacked package in
+     StoreDelete(tgt, fn)    remove it
+     StoreMake(tgt)          create the target if needed
+
+   'rec' and 'tgt' are opaque strings made by SetScope. Two backends:
+     DIR  directories (Unix, Windows): rec = <dir>/.rxpip, tgt = <dir>
+     CMS  VM/370plus (no directories, 8.8 file names): rec = 'CMS:<mode>',
+          tgt = a filemode letter; records live in GLOBALV group RXPIP.
+   The CMS routines are a SKELETON: they show the intended mapping and
+   are untested; see ARCHITECTURE.md ("VM/370plus").
    ======================================================================= */
 
+IsCms: procedure
+  parse source os .
+  return (translate(left(os,3)) = 'CMS')
+
+/* ---- record text ------------------------------------------------------ */
+RecLoad: procedure
+  parse arg rec
+  if left(rec,4) = 'CMS:' then return CmsRecLoad(substr(rec,5))
+  idx = rec || '/installed.txt'
+  if \FileExists(idx) then return ''
+  txt = ''
+  do while lines(idx) > 0
+    txt = txt || linein(idx) || '0a'x
+  end
+  call stream idx, 'c', 'close'
+  return txt
+
+RecSave: procedure
+  parse arg rec, txt
+  if left(rec,4) = 'CMS:' then do
+    call CmsRecSave substr(rec,5), txt
+    return
+  end
+  idx = rec || '/installed.txt'
+  call DelFile idx
+  if txt = '' then return
+  call EnsureDir rec
+  tmp = idx || '.new'
+  call DelFile tmp
+  call charout tmp, txt
+  call stream tmp, 'c', 'close'
+  call MoveFile tmp, idx
+  return
+
+/* ---- package files ----------------------------------------------------- */
+StoreMake: procedure
+  parse arg tgt
+  if IsCms() then return            /* a minidisk is already there */
+  call EnsureDir tgt
+  return
+
+StoreExists: procedure
+  parse arg tgt, fn
+  if IsCms() then return CmsStateFile(fn, tgt)
+  return FileExists(tgt || '/' || fn)
+
+StoreCopyIn: procedure
+  parse arg src, tgt, fn
+  if IsCms() then call CmsCopyIn src, tgt, fn
+  else call CopyFile src || '/' || fn, tgt || '/' || fn
+  return
+
+StoreDelete: procedure
+  parse arg tgt, fn
+  if IsCms() then call CmsErase fn, tgt
+  else call DelFile tgt || '/' || fn
+  return
+
+/* ---- CMS skeleton (VM/370plus, GLOBALV) -------------------------------------
+   Records: GLOBALV group RXPIP; per disk <mode> one variable
+   REC_<mode> holds the record text with the line ends turned into
+   '|' (GLOBALV values are single lines). Names must fit 8.8: a package
+   file 'name.type' maps to CMS file NAME TYPE <mode>. */
+CmsRecLoad: procedure
+  parse arg mode
+  address command 'GLOBALV SELECT RXPIP GET REC_' || mode
+  v = value('REC_' || mode)
+  return translate(v, '0a'x, '|')
+
+CmsRecSave: procedure
+  parse arg mode, txt
+  v = translate(txt, '|', '0a'x)
+  call value 'REC_' || mode, v
+  address command 'GLOBALV SELECT RXPIP PUT REC_' || mode
+  return
+
+CmsStateFile: procedure
+  parse arg fn, mode
+  parse var fn name '.' type
+  address command 'STATE' name type mode
+  return (rc = 0)
+
+CmsCopyIn: procedure
+  parse arg src, mode, fn
+  parse var fn name '.' type
+  /* the package unpacker for VM/370plus puts the files on a work disk;
+     'src' then names that disk's filemode */
+  address command 'COPYFILE' name type src '=' '=' mode '(REPLACE'
+  return
+
+CmsErase: procedure
+  parse arg fn, mode
+  parse var fn name '.' type
+  address command 'ERASE' name type mode
+  return
+
+/* ---- registry on top of the record text ---------------------------------- */
 InstalledVersion: procedure
-  parse arg home, name
-  rec = FindInstalledRecord(home, name)
-  if rec = '' then return ''
-  return StanzaFieldPlain(rec, 'VERSION')
+  parse arg rec, name
+  r = FindInstalledRecord(rec, name)
+  if r = '' then return ''
+  return StanzaFieldPlain(r, 'VERSION')
 
 FindInstalledRecord: procedure
-  parse arg home, name
-  idx = home || '/installed.txt'
-  if \FileExists(idx) then return ''
-  found = ''
+  parse arg rec, name
+  txt = RecLoad(rec)
   cur = ''
-  inrec = 0
-  do while lines(idx) > 0
-    l = linein(idx)
-    if left(l,5) = 'NAME:' then do
-      if inrec & pos('NAME:' name, ' ' || cur) > 0 then leave
-      cur = l || '0a'x
-      inrec = 1
-      curname = strip(substr(l,6))
-    end
-    else if l = '' then do
-      if inrec & curname = name then do
-        found = cur
-        leave
-      end
+  do while txt \= ''
+    parse var txt l '0a'x txt
+    if l = '' then do
+      if cur \= '' & StanzaFieldPlain(cur, 'NAME') = name then return cur
       cur = ''
-      inrec = 0
     end
     else cur = cur || l || '0a'x
   end
-  if found = '' & inrec & curname = name then found = cur
-  call stream idx, 'c', 'close'
-  return found
+  if cur \= '' & StanzaFieldPlain(cur, 'NAME') = name then return cur
+  return ''
+
+/* one line per installed package: name 01 version 01 summary */
+RecSummary: procedure
+  parse arg rec
+  txt = RecLoad(rec)
+  out = ''
+  cur = ''
+  do while txt \= ''
+    parse var txt l '0a'x txt
+    if l = '' then do
+      if cur \= '' then out = out || StanzaFieldPlain(cur,'NAME') || '01'x || StanzaFieldPlain(cur,'VERSION') || '01'x || StanzaFieldPlain(cur,'SUMMARY') || '0a'x
+      cur = ''
+    end
+    else cur = cur || l || '0a'x
+  end
+  if cur \= '' then out = out || StanzaFieldPlain(cur,'NAME') || '01'x || StanzaFieldPlain(cur,'VERSION') || '01'x || StanzaFieldPlain(cur,'SUMMARY') || '0a'x
+  return out
 
 RemoveInstalledRecord: procedure
-  parse arg home, name
-  idx = home || '/installed.txt'
-  if \FileExists(idx) then return
-  tmp = idx || '.new'
-  call DelFile tmp
-  skip = 0
-  kept = 0
-  do while lines(idx) > 0
-    l = linein(idx)
-    if left(l,5) = 'NAME:' then do
-      curname = strip(substr(l,6))
-      skip = (curname = name)
+  parse arg rec, name
+  txt = RecLoad(rec)
+  if txt = '' then return
+  out = ''
+  cur = ''
+  do while txt \= ''
+    parse var txt l '0a'x txt
+    if l = '' then do
+      if cur \= '' & StanzaFieldPlain(cur, 'NAME') \= name then out = out || cur || '0a'x
+      cur = ''
     end
-    if \skip then do
-      call charout tmp, l || '0a'x
-      kept = 1
-    end
-    if l = '' then skip = 0
+    else cur = cur || l || '0a'x
   end
-  call stream idx, 'c', 'close'
-  if kept then do
-    call stream tmp, 'c', 'close'
-    call MoveFile tmp, idx
-  end
-  else call DelFile idx        /* nothing left: no empty file, no failing move */
+  if cur \= '' & StanzaFieldPlain(cur, 'NAME') \= name then out = out || cur || '0a'x
+  call RecSave rec, out
   return
 
 RecordInstalled: procedure
-  parse arg home, name, ver, author, summary, requires, files
-  call RemoveInstalledRecord home, name
-  idx = home || '/installed.txt'
-  call charout idx, 'NAME: ' || name || '0a'x
-  call charout idx, 'VERSION: ' || ver || '0a'x
-  call charout idx, 'AUTHOR: ' || author || '0a'x
-  call charout idx, 'SUMMARY: ' || summary || '0a'x
-  call charout idx, 'REQUIRES: ' || requires || '0a'x
-  call charout idx, 'FILES: ' || files || '0a'x
-  call charout idx, '0a'x
-  call stream idx, 'c', 'close'
+  parse arg rec, name, ver, author, summary, requires, files
+  call RemoveInstalledRecord rec, name
+  txt = RecLoad(rec)
+  txt = txt || 'NAME: ' || name || '0a'x || 'VERSION: ' || ver || '0a'x || 'AUTHOR: ' || author || '0a'x ,
+      || 'SUMMARY: ' || summary || '0a'x || 'REQUIRES: ' || requires || '0a'x || 'FILES: ' || files || '0a'x || '0a'x
+  call RecSave rec, txt
   return
 
 /* =======================================================================

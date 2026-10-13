@@ -437,3 +437,43 @@ address). Limits: 100 pending requests, 3 per IP, expiry after 14 days,
 honeypot field, strict validation of every field (no control characters
 reach a mail header). Off unless `RXPIP_ADMIN_EMAIL` is set; mail is sent
 through `sendmail` (or `RXPIP_SENDMAIL`).
+
+## 10. Install scopes and storage backends
+
+`install`, `uninstall`, `list`, `freeze` and `scan` act on a *scope*:
+the current directory by default (files in it, record in
+`./.rxpip/installed.txt`), `--global` for the shared store under
+`~/.rxpip`, `--target DIR` for another directory. `run`/`build` always
+merge the shared store. `rxpip find [dir…] [--sync]` collects the records
+below some roots and the shared store, shows duplicates and copies older
+than the newest version found, and with `--sync` upgrades them in place.
+A package file that exists in the target but is not in the package's own
+record is never overwritten without `--force`.
+
+In the Regina/ooRexx client everything that knows *where* things live is
+one section ("Storage backends"): `RecLoad`/`RecSave` (record text of a
+scope), `StoreExists`/`StoreCopyIn`/`StoreDelete`/`StoreMake` (package
+files). The registry (find, remove, record, summary) works on the record
+text only. A new environment supplies these routines and `SetScope`.
+
+### VM/370plus (planned — skeleton only)
+
+The target has no directories, file names of at most 8.8 characters
+(name, type), and uses GLOBALV like an ini file. BREXX and cREXX run
+there; a TCP/IP client is expected, and packaging for the platform is
+done elsewhere. The skeleton in the Regina client maps the model as:
+
+| model            | directories (now)           | CMS (planned)                          |
+|------------------|-----------------------------|----------------------------------------|
+| scope            | a directory                 | a minidisk filemode (`A`, `B`, …)      |
+| package files    | files in the directory      | `NAME TYPE <mode>` via COPYFILE/ERASE  |
+| record           | `<dir>/.rxpip/installed.txt`| GLOBALV group `RXPIP`, variable `REC_<mode>` |
+| shared store     | `~/.rxpip`                  | the disk named by `LIB_DIR`            |
+
+Still open: GLOBALV value length limits (the skeleton keeps a whole
+record in one variable, line ends turned into `|`; one variable per
+package may be needed), how package files reach the work disk (network
+fetch by the TCP/IP client, or a protocol on a service engine), the 8.8
+rule for package and file names (to be enforced when a package is
+published for the CMS platform tag), and `find` (iterate the GLOBALV
+group). None of the CMS routines has been run.
