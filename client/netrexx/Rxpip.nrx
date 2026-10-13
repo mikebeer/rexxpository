@@ -32,6 +32,10 @@ class Rxpip
     repoUrl  = Rexx
     lastRc   = int 0
     upgrade  = int 0
+    tgtDir   = Rexx          -- where package files go
+    recDir   = Rexx          -- directory that holds installed.txt
+    isGlobal = int 0
+    forceOw  = int 0
     NL       = Rexx '0A'.x2c()
     SOH      = Rexx '01'.x2c()
 
@@ -61,6 +65,10 @@ class Rxpip
     loop i = 1 to args.length - 1
       rest[i - 1] = args[i]
     end
+    -- install scope: the current directory by default for the commands that
+    -- manage installed packages; run/build use the shared store
+    if ' INSTALL UNINSTALL LIST FREEZE SCAN '.pos(' 'cmd' ') > 0 then rest = parseScope(rest)
+    else setScope('GLOBAL', '')
     do
       select
         when cmd = 'INSTALL'   then cmdInstall(rest)
@@ -69,6 +77,7 @@ class Rxpip
         when cmd = 'SEARCH'    then cmdSearch(rest)
         when cmd = 'SHOW'      then cmdShow(rest)
         when cmd = 'FREEZE'    then cmdFreeze
+        when cmd = 'FIND'      then cmdFind(rest)
         when cmd = 'SCAN'      then cmdScan(rest)
         when cmd = 'RUN'       then cmdRun(rest)
         when cmd = 'BUILD'     then cmdBuild(rest)
@@ -96,9 +105,12 @@ class Rxpip
     say 'RXPIP -- the REXX package manager (NetRexx client)'
     say ''
     say 'Commands:'
-    say '  install [--upgrade] <name>[==version]   install a package (and its deps); --upgrade/-U updates an installed one'
+    say '  install [--upgrade] <name>[==version]   install a package (and its deps) into the current'
+    say '                              directory; --upgrade/-U updates an installed one'
     say '  uninstall <name>            remove an installed package'
     say '  list                        list installed packages'
+    say '  find [dir...] [--sync]      find installs under dirs (default .), show duplicates/older copies;'
+    say '                              --sync brings older copies up to the newest version found'
     say '  search <term>               search the repository'
     say '  show <name>                 show repository details for a package'
     say '  freeze                      print installed packages as name==version'
@@ -113,6 +125,11 @@ class Rxpip
     say '  owner list|add|remove <pkg> [user]   manage who may publish a package'
     say '  config get|set <key> [val]  view/change REPO_URL, LIB_DIR, INTERPRETER'
     say '  help                        this message'
+    say ''
+    say 'Scope options (install, uninstall, list, freeze, scan):'
+    say '  --global, -g               use the shared store instead of the current directory'
+    say '  --target=DIR, -t DIR       use directory DIR'
+    say '  --force                    overwrite files that rxpip did not install'
 
   /* =====================================================================
      COMMANDS
@@ -198,9 +215,18 @@ class Rxpip
     if curver \= '' then do
       -- replacing an older version: drop its files so none linger
       oldfiles = stanzaField(findRecord(name), 'FILES')
-      loop k = 1 to oldfiles.words
-        deletePath(home'/'lang'/lib/'oldfiles.word(k))
+    end
+    else oldfiles = ''
+    if forceOw = 0 then do
+      loop k = 1 to files.words
+        if fileExists(tgtDir'/'files.word(k)) & oldfiles.wordpos(files.word(k)) = 0 then do
+          say "rxpip: '"tgtDir"/"files.word(k)"' already exists and was not installed by rxpip; use --force to overwrite"
+          return seen
+        end
       end
+    end
+    loop k = 1 to oldfiles.words
+      deletePath(tgtDir'/'oldfiles.word(k))
     end
     pkgdir = home'/'lang'/pkgs/'name'/'ver
     deleteTree(pkgdir)
@@ -208,7 +234,8 @@ class Rxpip
     exec(['tar', 'xzf', cachefile, '-C', pkgdir])
     loop i = 1 to files.words
       fn = files.word(i)
-      copyFile(pkgdir'/'fn, home'/'lang'/lib/'fn)
+      mkdirs(tgtDir)
+      copyFile(pkgdir'/'fn, tgtDir'/'fn)
     end
     recordInstalled(name, ver, author, summary, requires, files)
 
@@ -239,14 +266,14 @@ class Rxpip
     end
     files = stanzaField(rec, 'FILES')
     loop i = 1 to files.words
-      deletePath(home'/'lang'/lib/'files.word(i))
+      deletePath(tgtDir'/'files.word(i))
     end
-    deleteTree(home'/'lang'/pkgs/'name)
+    if isGlobal = 1 then deleteTree(home'/'lang'/pkgs/'name)
     removeRecord(name)
     say 'rxpip: removed' name
 
   method cmdList static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
-    idx = home'/'lang'/installed.txt'
+    idx = recDir'/installed.txt'
     if \fileExists(idx) | records().size() = 0 then do
       say '(no packages installed)'
       return
@@ -264,6 +291,147 @@ class Rxpip
     loop while it2.hasNext()
       r = it2.next()
       say stanzaField(Rexx(r.toString), 'NAME')'=='stanzaField(Rexx(r.toString), 'VERSION')
+    end
+
+  /* =====================================================================
+     INSTALL SCOPE and `find`
+     ===================================================================== */
+  method setScope(mode=Rexx, dir=Rexx) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    if mode = 'GLOBAL' then do
+      isGlobal = 1
+      tgtDir = home'/'lang'/lib'
+      recDir = home'/'lang
+    end
+    else do
+      if dir = '' then dir = Rexx(System.getProperty('user.dir'))
+      dir = dir.translate('/', Rexx('5C').x2c())
+      if dir.length > 1 & dir.right(1) = '/' then dir = dir.left(dir.length - 1)
+      isGlobal = 0
+      tgtDir = dir
+      recDir = dir'/.rxpip'
+    end
+
+  method parseScope(a=String[]) static returns String[] signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    mode = Rexx 'LOCAL'
+    dir = Rexx ''
+    kept = ArrayList()
+    i = 0
+    loop while i < a.length
+      w = Rexx(a[i])
+      if w = '--global' | w = '-g' then mode = 'GLOBAL'
+      else if w.left(9) = '--target=' then dir = w.substr(10)
+      else if w = '-t' | w = '--target' then do
+        i = i + 1
+        if i < a.length then dir = Rexx(a[i])
+      end
+      else if w = '--force' then forceOw = 1
+      else kept.add(a[i])
+      i = i + 1
+    end
+    if dir \= '' then mode = 'LOCAL'
+    setScope(mode, dir)
+    res = String[kept.size()]
+    loop j = 0 to kept.size() - 1
+      res[j] = String kept.get(j)
+    end
+    return res
+
+  -- collect every .../.rxpip/installed.txt below dir (does not follow symlinks)
+  method findRecs(dir=File, acc=ArrayList) static
+    kids = dir.listFiles()
+    if kids = null then return
+    loop j = 0 to kids.length - 1
+      k = kids[j]
+      if Files.isSymbolicLink(k.toPath()) then iterate j
+      if k.isDirectory() then do
+        if k.getName() = '.rxpip' then do
+          if File(k, 'installed.txt').exists() then acc.add(k.getPath().replace(Rexx('5C').x2c().toString.charAt(0), '/'))
+        end
+        else findRecs(k, acc)
+      end
+    end
+
+  method cmdFind(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    sync = 0
+    roots = ArrayList()
+    loop i = 0 to a.length - 1
+      if Rexx(a[i]) = '--sync' then sync = 1
+      else roots.add(a[i])
+    end
+    if roots.size() = 0 then roots.add(System.getProperty('user.dir'))
+    locs = ArrayList()
+    locs.add((home'/'lang).toString)
+    loop i = 0 to roots.size() - 1
+      findRecs(File(String roots.get(i)), locs)
+    end
+    names = ArrayList(); vers = ArrayList(); dirs = ArrayList()
+    seenDirs = ' '
+    loop i = 0 to locs.size() - 1
+      d = Rexx(String locs.get(i))
+      if seenDirs.pos(' 'd' ') > 0 then iterate i
+      seenDirs = seenDirs d' '
+      it = (recordsAt(d)).iterator()
+      loop while it.hasNext()
+        r = Rexx(it.next().toString)
+        names.add(stanzaField(r, 'NAME').toString)
+        vers.add(stanzaField(r, 'VERSION').toString)
+        dirs.add(d.toString)
+      end
+    end
+    n = names.size()
+    if n = 0 then do
+      say '(no rxpip installs found)'
+      return
+    end
+    best = HashMap()
+    loop i = 0 to n - 1
+      nm = String names.get(i)
+      v = Rexx(String vers.get(i))
+      if best.get(nm) = null then best.put(nm, v.toString)
+      else if compareVersions(v, Rexx(String best.get(nm))) > 0 then best.put(nm, v.toString)
+    end
+    say 'NAME'.left(20) 'VERSION'.left(12) 'LOCATION'
+    say '-'.copies(70)
+    fixName = ArrayList(); fixDir = ArrayList(); fixVer = ArrayList()
+    dupSeen = ' '; dup = 0
+    loop i = 0 to n - 1
+      nmx = Rexx(String names.get(i))
+      d = Rexx(String dirs.get(i))
+      v = Rexx(String vers.get(i))
+      if d = (home'/'lang) then shown = '(shared store)' d
+      else shown = d.left(d.length - 7)
+      note = ''
+      bv = Rexx(String best.get(nmx.toString))
+      if compareVersions(v, bv) < 0 then do
+        note = '  <- older than' bv
+        fixName.add(nmx.toString); fixDir.add(d.toString); fixVer.add(bv.toString)
+      end
+      say nmx.left(20) v.left(12) shown || note
+      c = 0
+      loop j = 0 to n - 1
+        if Rexx(String names.get(j)) = nmx then c = c + 1
+      end
+      if c > 1 & dupSeen.pos(' 'nmx' ') = 0 then do
+        dupSeen = dupSeen nmx' '
+        dup = dup + 1
+      end
+    end
+    say ''
+    say n 'install(s),' dup 'package(s) in more than one place,' fixName.size() 'outdated.'
+    if fixName.size() > 0 then do
+      if sync = 1 then do
+        say ''
+        loop k = 0 to fixName.size() - 1
+          fd = Rexx(String fixDir.get(k))
+          if fd = (home'/'lang) then setScope('GLOBAL', '')
+          else setScope('LOCAL', fd.left(fd.length - 7))
+          upgrade = 1
+          fnm = Rexx(String fixName.get(k))
+          say 'rxpip: updating' fnm 'in' tgtDir
+          installOne(fnm'=='Rexx(String fixVer.get(k)), '')
+        end
+      end
+      else say "Run 'rxpip find --sync' to bring the older copies up to date."
     end
 
   method cmdSearch(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
@@ -836,8 +1004,11 @@ class Rxpip
      format as the other clients: NAME/VERSION/AUTHOR/SUMMARY/REQUIRES/FILES)
      ===================================================================== */
   method records static returns ArrayList signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    return recordsAt(recDir)
+
+  method recordsAt(dir=Rexx) static returns ArrayList signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
     res = ArrayList()
-    idx = home'/'lang'/installed.txt'
+    idx = dir'/installed.txt'
     if \fileExists(idx) then return res
     txt = readText(idx)
     cur = ''
@@ -872,11 +1043,13 @@ class Rxpip
       r = it9.next()
       if stanzaField(Rexx(r.toString), 'NAME') \= name then out = out || Rexx(r.toString) || NL
     end
-    replaceText(home'/'lang'/installed.txt', out)
+    if out = '' then deletePath(recDir'/installed.txt')
+    else replaceText(recDir'/installed.txt', out)
 
   method recordInstalled(name=Rexx, ver=Rexx, author=Rexx, summary=Rexx, requires=Rexx, files=Rexx) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
     removeRecord(name)
-    idx = home'/'lang'/installed.txt'
+    mkdirs(recDir)
+    idx = recDir'/installed.txt'
     cur = ''
     if fileExists(idx) then cur = readText(idx)
     cur = cur'NAME: 'name || NL || 'VERSION: 'ver || NL || 'AUTHOR: 'author || NL-

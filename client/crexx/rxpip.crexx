@@ -17,7 +17,7 @@
    * Needs rxc, rxas and rxvm on the PATH (or CREXX_HOME/bin) for run/build.
    --------------------------------------------------------------------- */
 options levelb
-namespace rxpip expose home lang repoUrl NL SOH lastrc upgrade
+namespace rxpip expose home lang repoUrl NL SOH lastrc upgrade tgtDir recDir isGlobal forceOw
 import rxfnsb
 
 main: procedure = .int
@@ -27,6 +27,10 @@ main: procedure = .int
   lang = 'crexx'
   lastrc = 0
   upgrade = 0
+  forceOw = 0
+  isGlobal = 0
+  tgtDir = ''
+  recDir = ''
   home = getenv('RXPIP_HOME')
   if home = '' then do
     h = getenv('HOME')
@@ -46,6 +50,10 @@ main: procedure = .int
   do i = 2 to a.0
     rest[i - 1] = a[i]
   end
+  /* install scope: the current directory by default for the commands that
+     manage installed packages; run/build use the shared store */
+  if wordpos(cmd, 'INSTALL UNINSTALL LIST FREEZE SCAN') > 0 then rest = parseScope(rest)
+  else call setScope('GLOBAL', '')
   select
     when cmd = 'INSTALL'   then call cmdInstall(rest)
     when cmd = 'UNINSTALL' then call cmdUninstall(rest)
@@ -53,6 +61,7 @@ main: procedure = .int
     when cmd = 'SEARCH'    then call cmdSearch(rest)
     when cmd = 'SHOW'      then call cmdShow(rest)
     when cmd = 'FREEZE'    then call cmdFreeze
+    when cmd = 'FIND'      then call cmdFind(rest)
     when cmd = 'SCAN'      then call cmdScan(rest)
     when cmd = 'RUN'       then return cmdRun(rest)
     when cmd = 'BUILD'     then return cmdBuild(rest)
@@ -76,9 +85,12 @@ cmdHelp: procedure = .void
   say 'RXPIP -- the REXX package manager (cREXX client)'
   say ''
   say 'Commands:'
-  say '  install [--upgrade] <name>[==version]   install a package (and its deps); --upgrade/-U updates an installed one'
+  say '  install [--upgrade] <name>[==version]   install a package (and its deps) into the current'
+  say '                              directory; --upgrade/-U updates an installed one'
   say '  uninstall <name>            remove an installed package'
   say '  list                        list installed packages'
+  say '  find [dir...] [--sync]      find installs under dirs (default .), show duplicates/older copies;'
+  say '                              --sync brings older copies up to the newest version found'
   say '  search <term>               search the repository'
   say '  show <name>                 show repository details for a package'
   say '  freeze                      print installed packages as name==version'
@@ -93,6 +105,11 @@ cmdHelp: procedure = .void
   say '  owner list|add|remove <pkg> [user]   manage who may publish a package'
   say '  config get|set <key> [val]  view/change REPO_URL, LIB_DIR, INTERPRETER'
   say '  help                        this message'
+  say ''
+  say 'Scope options (install, uninstall, list, freeze, scan):'
+  say '  --global, -g               use the shared store instead of the current directory'
+  say '  --target=DIR, -t DIR       use directory DIR'
+  say '  --force                    overwrite files that rxpip did not install'
   return
 
 /* =====================================================================
@@ -197,12 +214,23 @@ installOne: procedure = .string
     say 'rxpip: download failed for' name ver
     return seen
   end
+  oldfiles = ''
   if curver \= '' then do
     /* replacing an older version: drop its files so none linger */
     oldfiles = stanzaField(findRecord(name), 'FILES')
-    do k = 1 to words(oldfiles)
-      call rmfile(home || '/' || lang || '/lib/' || word(oldfiles, k))
+  end
+  if forceOw = 0 then do
+    do k = 1 to words(files)
+      if fileExists(tgtDir || '/' || word(files, k)) then do
+        if wordpos(word(files, k), oldfiles) = 0 then do
+          say "rxpip: '" || tgtDir || '/' || word(files, k) || "' already exists and was not installed by rxpip; use --force to overwrite"
+          return seen
+        end
+      end
     end
+  end
+  do k = 1 to words(oldfiles)
+    call rmfile(tgtDir || '/' || word(oldfiles, k))
   end
   pkgdir = home || '/' || lang || '/pkgs/' || name || '/' || ver
   call rmtree(pkgdir)
@@ -216,7 +244,8 @@ installOne: procedure = .string
   tmp = exec(argv)
   do i = 1 to words(files)
     fn = word(files, i)
-    call copyFile(pkgdir || '/' || fn, home || '/' || lang || '/lib/' || fn)
+    call mkdirs(tgtDir)
+    call copyFile(pkgdir || '/' || fn, tgtDir || '/' || fn)
   end
   call recordInstalled(name, ver, author, summary, requires, files)
 
@@ -250,9 +279,9 @@ cmdUninstall: procedure = .void
   end
   files = stanzaField(rec, 'FILES')
   do i = 1 to words(files)
-    call rmfile(home || '/' || lang || '/lib/' || word(files, i))
+    call rmfile(tgtDir || '/' || word(files, i))
   end
-  call rmtree(home || '/' || lang || '/pkgs/' || name)
+  if isGlobal = 1 then call rmtree(home || '/' || lang || '/pkgs/' || name)
   call removeRecord(name)
   say 'rxpip: removed' name
   return
@@ -274,6 +303,172 @@ cmdFreeze: procedure = .void
   recs = records()
   do i = 1 to recs.0
     say stanzaField(recs[i], 'NAME') || '==' || stanzaField(recs[i], 'VERSION')
+  end
+  return
+
+/* =====================================================================
+   INSTALL SCOPE and `find`
+   ===================================================================== */
+setScope: procedure = .void
+  arg mode = .string, dir = .string
+  if mode = 'GLOBAL' then do
+    isGlobal = 1
+    tgtDir = home || '/' || lang || '/lib'
+    recDir = home || '/' || lang
+  end
+  else do
+    if dir = '' then dir = getenv('PWD')
+    if dir = '' then dir = '.'
+    dir = translate(dir, '/', '5C'x)
+    if length(dir) > 1 then do
+      if right(dir, 1) = '/' then dir = substr(dir, 1, length(dir) - 1)
+    end
+    isGlobal = 0
+    tgtDir = dir
+    recDir = dir || '/.rxpip'
+  end
+  return
+
+parseScope: procedure = .string[]
+  arg a = .string[]
+  mode = 'LOCAL'
+  dir = ''
+  res = .string[]
+  n = 0
+  i = 1
+  do while i <= a.0
+    w = a[i]
+    if w = '--global' | w = '-g' then mode = 'GLOBAL'
+    else if left(w, 9) = '--target=' then dir = substr(w, 10)
+    else if w = '-t' | w = '--target' then do
+      i = i + 1
+      if i <= a.0 then dir = a[i]
+    end
+    else if w = '--force' then forceOw = 1
+    else do
+      n = n + 1
+      res[n] = w
+    end
+    i = i + 1
+  end
+  if dir \= '' then mode = 'LOCAL'
+  call setScope(mode, dir)
+  return res
+
+cmdFind: procedure = .void
+  arg a = .string[]
+  sync = 0
+  roots = ''
+  do i = 1 to a.0
+    if a[i] = '--sync' then sync = 1
+    else roots = roots || a[i] || SOH
+  end
+  if roots = '' then do
+    pw = getenv('PWD')
+    if pw = '' then pw = '.'
+    roots = pw || SOH
+  end
+  /* locations: the shared store plus every .../.rxpip/installed.txt below the roots */
+  locs = .string[]
+  nl = 1
+  locs[1] = home || '/' || lang
+  do while roots \= ''
+    p = pos(SOH, roots)
+    r = substr(roots, 1, p - 1)
+    roots = substr(roots, p + 1)
+    argv = .string[]
+    argv[1] = 'find'
+    argv[2] = r
+    argv[3] = '-name'
+    argv[4] = 'installed.txt'
+    argv[5] = '-path'
+    argv[6] = '*/.rxpip/installed.txt'
+    found = exec(argv)
+    do while found \= ''
+      ln = nextLine(found)
+      q = pos('/.rxpip/installed.txt', ln)
+      if q > 0 then do
+        d = substr(ln, 1, q + 6)
+        dup = 0
+        do j = 1 to nl
+          if locs[j] = d then dup = 1
+        end
+        if dup = 0 then do
+          nl = nl + 1
+          locs[nl] = d
+        end
+      end
+    end
+  end
+  /* collect name / version / dir triples */
+  names = .string[]
+  vers = .string[]
+  dirs = .string[]
+  n = 0
+  do i = 1 to nl
+    recs = recordsAt(locs[i])
+    do j = 1 to recs.0
+      n = n + 1
+      names[n] = stanzaField(recs[j], 'NAME')
+      vers[n] = stanzaField(recs[j], 'VERSION')
+      dirs[n] = locs[i]
+    end
+  end
+  if n = 0 then do
+    say '(no rxpip installs found)'
+    return
+  end
+  best = .string[]
+  do i = 1 to n
+    best[i] = vers[i]
+    do j = 1 to n
+      if names[j] = names[i] then do
+        if compareVersions(vers[j], best[i]) > 0 then best[i] = vers[j]
+      end
+    end
+  end
+  say left('NAME', 20) left('VERSION', 12) 'LOCATION'
+  say copies('-', 70)
+  fixIdx = .string[]
+  nfix = 0
+  ndup = 0
+  dupSeen = ' '
+  do i = 1 to n
+    if dirs[i] = home || '/' || lang then shown = '(shared store) ' || dirs[i]
+    else shown = substr(dirs[i], 1, length(dirs[i]) - 7)
+    note = ''
+    if compareVersions(vers[i], best[i]) < 0 then do
+      note = '  <- older than' best[i]
+      nfix = nfix + 1
+      fixIdx[nfix] = i
+    end
+    say left(names[i], 20) left(vers[i], 12) shown || note
+    c = 0
+    do j = 1 to n
+      if names[j] = names[i] then c = c + 1
+    end
+    if c > 1 then do
+      if pos(' ' || names[i] || ' ', dupSeen) = 0 then do
+        dupSeen = dupSeen || names[i] || ' '
+        ndup = ndup + 1
+      end
+    end
+  end
+  say ''
+  say n 'install(s),' ndup 'package(s) in more than one place,' nfix 'outdated.'
+  if nfix > 0 then do
+    if sync = 1 then do
+      say ''
+      do k = 1 to nfix
+        ix = fixIdx[k]
+        if dirs[ix] = home || '/' || lang then call setScope('GLOBAL', '')
+        else call setScope('LOCAL', substr(dirs[ix], 1, length(dirs[ix]) - 7))
+        upgrade = 1
+        say 'rxpip: updating' names[ix] 'in' tgtDir
+        seenx = installOne(names[ix] || '==' || best[ix], '')
+      end
+    end
+    else say "Run 'rxpip find --sync' to bring the older copies up to date."
   end
   return
 
@@ -950,8 +1145,12 @@ opt: procedure = .string
    format as the other clients: NAME/VERSION/AUTHOR/SUMMARY/REQUIRES/FILES)
    ===================================================================== */
 records: procedure = .string[]
+  return recordsAt(recDir)
+
+recordsAt: procedure = .string[]
+  arg dir = .string
   res = .string[]
-  idx = home || '/' || lang || '/installed.txt'
+  idx = dir || '/installed.txt'
   if \fileExists(idx) then return res
   lines = readlines(idx)
   cur = ''
@@ -993,13 +1192,15 @@ removeRecord: procedure = .void
   do i = 1 to recs.0
     if stanzaField(recs[i], 'NAME') \= name then out = out || recs[i] || NL
   end
-  call writeText(home || '/' || lang || '/installed.txt', out)
+  if out = '' then call rmfile(recDir || '/installed.txt')
+  else call writeText(recDir || '/installed.txt', out)
   return
 
 recordInstalled: procedure = .void
   arg name = .string, ver = .string, author = .string, summary = .string, requires = .string, files = .string
   call removeRecord(name)
-  idx = home || '/' || lang || '/installed.txt'
+  call mkdirs(recDir)
+  idx = recDir || '/installed.txt'
   cur = ''
   if fileExists(idx) then cur = loadtext(idx, NL)
   cur = cur || 'NAME: ' || name || NL || 'VERSION: ' || ver || NL || 'AUTHOR: ' || author || NL || 'SUMMARY: ' || summary || NL || 'REQUIRES: ' || requires || NL || 'FILES: ' || files || NL || NL

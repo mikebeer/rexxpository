@@ -73,6 +73,7 @@ run_client() {
   plat=$(platform_of "$c")
   make_fixtures "$c"; d=$WORK/fx_$c
   export RXPIP_HOME=$WORK/home_$c; mkdir -p "$RXPIP_HOME"
+  local cwd=$WORK/cwd_$c; mkdir -p "$cwd"; cd "$cwd"      # installs go to the current directory
   local out inv user=u$c
   out=$($RX config set REPO_URL "$BASE" 2>&1); expect "config set" "$out" "set REPO_URL"
   out=$($RX list 2>&1);                         expect "empty list" "$out" "(no packages installed)"
@@ -116,6 +117,28 @@ run_client() {
   out=$($RX list 2>&1);                         expect "list is empty after the last uninstall" "$out" "(no packages installed)"
   out=$($RX install m1$c==1.0.1 2>&1);          expect "installing again into an empty store" "$out" "installing m1$c 1.0.1"
   out=$($RX install m1$c==1.0.0 2>&1);          expect "a lower == version is satisfied by the newer install" "$out" "1.0.1 already installed"
+  # ---- scope: current directory (default), --global, --target, find ----
+  local f1; f1=$(tar tzf "$d/lib1.rxpkg" | head -1)
+  [ -f "$cwd/$f1" ] && ok "package file is in the current directory" || bad "package file is in the current directory" "$(ls -a "$cwd")"
+  [ -f "$cwd/.rxpip/installed.txt" ] && ok "record is kept in ./.rxpip" || bad "record is kept in ./.rxpip" "$(ls -a "$cwd")"
+  out=$($RX list --global 2>&1);                expect "--global list is a separate store" "$out" "m1$c"
+  expect_not "the shared store has no m2" "$out" "m2$c"
+  local other_dir=$WORK/other_$c; mkdir -p "$other_dir"
+  out=$(cd "$other_dir" && $RX list 2>&1);      expect "another directory starts empty" "$out" "(no packages installed)"
+  out=$($RX install --target "$other_dir" m1$c==1.0.0 2>&1); expect "--target installs elsewhere" "$out" "installing m1$c 1.0.0"
+  [ -f "$other_dir/$f1" ] && ok "--target puts the files there" || bad "--target puts the files there" "$(ls -a "$other_dir")"
+  out=$($RX find "$cwd" "$other_dir" 2>&1);     expect "find lists both installs" "$out" "$other_dir"
+  expect "find flags the older copy" "$out" "older than 1.0.1"
+  out=$($RX find --sync "$cwd" "$other_dir" 2>&1); expect "find --sync updates it" "$out" "updating m1$c"
+  out=$($RX list --target "$other_dir" 2>&1);   expect "the older copy is now current" "$out" "1.0.1"
+  out=$($RX find "$cwd" "$other_dir" 2>&1);     expect_not "nothing outdated after --sync" "$out" "older than"
+  local clash=$WORK/clash_$c; mkdir -p "$clash"; echo "mine" > "$clash/$f1"
+  out=$($RX install --target "$clash" m1$c 2>&1); expect "an existing foreign file is not overwritten" "$out" "not installed by rxpip"
+  [ "$(cat "$clash/$f1")" = mine ] && ok "the foreign file is untouched" || bad "the foreign file is untouched" "$(cat "$clash/$f1")"
+  out=$($RX install --force --target "$clash" m1$c 2>&1); expect "--force overwrites" "$out" "installing m1$c"
+  out=$($RX uninstall --target "$clash" m1$c 2>&1); expect "uninstall --target" "$out" "removed m1$c"
+  out=$($RX uninstall --target "$other_dir" m1$c 2>&1); expect "uninstall in the other directory" "$out" "removed m1$c"
+  [ -f "$other_dir/$f1" ] && bad "uninstall removes the files" "still there" || ok "uninstall removes the files"
   out=$($RX install doesnotexist 2>&1);         expect "install unknown" "$out" "cannot resolve"
   out=$($RX install "m1$c>=9.0.0" 2>&1);        expect ">= on an old install reports the problem" "$out" "needs version >=9.0.0"
   out=$($RX token new --label=ci 2>&1);         expect "token new" "$out" "TOKEN: rxp_"
@@ -133,7 +156,7 @@ run_client() {
   out=$($RX whoami 2>&1);                       expect "whoami after logout" "$out" "not logged in"
   ls /tmp 2>/dev/null | grep -q rxpip_hdr_ && bad "no token header file left behind" || ok "no token header file left behind"
   grep -rq "rxp_" "$REPO" 2>/dev/null && bad "server never stores a clear token" || ok "server never stores a clear token"
-  unset RXPIP_HOME
+  cd "$ROOT"; unset RXPIP_HOME
 }
 
 for c in ${CLIENTS:-regina oorexx netrexx crexx}; do run_client "$c"; done
@@ -143,11 +166,12 @@ if [ -z "${CLIENTS:-}" ] && [ -n "$(client_cmd regina)" ] && [ -n "$(client_cmd 
   echo; echo "== cross-client: Regina and ooRexx share one package store"
   export RXPIP_HOME=$WORK/home_shared; mkdir -p "$RXPIP_HOME"
   R=$(client_cmd regina); O=$(client_cmd oorexx)
+  mkdir -p "$WORK/cwd_shared"; cd "$WORK/cwd_shared"
   $R config set REPO_URL "$BASE" >/dev/null 2>&1
   expect "Regina installs the classic package" "$($R install m1regina 2>&1)" "installing m1regina"
   expect "ooRexx sees it as installed" "$($O list 2>&1)" "m1regina"
   expect "ooRexx will not reinstall it" "$($O install m1regina 2>&1)" "already installed"
-  unset RXPIP_HOME
+  cd "$ROOT"; unset RXPIP_HOME
 fi
 
 echo

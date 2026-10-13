@@ -133,15 +133,27 @@ against every client found on the machine — Regina, ooRexx, NetRexx
 on the PATH) — and skips the ones that are not installed.
 
 
-## Why `rxpip run`/`rxpip build`, not just `install`?
+## Where packages are installed
 
-Classic REXX interpreters — Regina included — do **not** auto-discover
-external routines by scanning the current directory for a file matching
-the routine's name. (We tested this directly: even with a properly
-executable, correctly-cased file sitting right there, an unresolved call
-just falls through to the shell.) So `install`/`scan` alone only fetch
-files into `~/.rxpip/lib/`; they don't make a `/* REQUIRE */`-d routine
-callable by themselves.
+`install`, `uninstall`, `list`, `freeze` and `scan` work on the **current
+directory** by default: the package files are copied into it and a record of
+what was installed goes to `./.rxpip/installed.txt`. Use `--global` (`-g`) for
+the shared store in `~/.rxpip`, `--target=DIR` (`-t DIR`) for another directory,
+and `--force` to overwrite a file rxpip did not install. `run` and `build` use
+the shared store.
+
+`rxpip find [dir...] [--sync]` finds all installs below the given directories
+(default: the current one) plus the shared store, shows packages that exist in
+several places and which copies are older; `--sync` brings them up to date.
+
+## Why `rxpip run`/`rxpip build`, as well as `install`?
+
+Regina and ooRexx find an external routine by file name: a call to `Square(7)`
+runs the file `Square.rexx` (or `.rex`) found in the current directory or on
+the `PATH`. That works for a package whose files each hold one routine and are
+named after it, and such a package can be used straight from the directory it
+was installed in. It does not work when one file holds several routines, or
+when a routine in one file needs a label in another.
 
 `run` and `build` solve this the portable way: they concatenate your
 script's source with a safety `EXIT` and then the source of every

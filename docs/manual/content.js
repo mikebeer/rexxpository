@@ -52,7 +52,7 @@ module.exports = function (D) {
   ], 'A program with REQUIRE lines');
   D.p('`rxpip run demo.rexx` reads the `REQUIRE` lines, installs anything that is missing together with its own dependencies, and then runs the program. `rxpip build demo.rexx` does the same but writes out a single self-contained REXX file instead of running it.');
   D.h3('Why run and build, and not just install');
-  D.p('Classic REXX interpreters, Regina included, do not look in the current directory for a file named after an external routine. A file called `Square.rexx` is not found when your program calls `Square(7)`. RXPIP therefore uses the one method that works identically everywhere: it joins your program, a safety `exit`, and the source of every installed package into one ordinary REXX program, in which every required routine is simply another label. `rxpip install` on its own only fetches the files; `run` and `build` make them callable.');
+  D.p('Regina and ooRexx find an external routine by file name: a call to `Square(7)` runs the file `Square.rexx` (or `.rex`) in the current directory or on the `PATH`. That works for a package whose files each hold one routine and are named after it, and you can use such a package straight from the directory it was installed in. It does not work when one file holds several routines, or when a routine in one file needs a label in another. For those cases RXPIP uses a method that works identically everywhere: it joins your program, a safety `exit`, and the source of every installed package of the shared store into one ordinary REXX program, in which every required routine is simply another label. `run` and `build` do this.');
   D.h2('Artifacts: source and bytecode');
   D.p('Each version of a package can carry several //artifacts//. An artifact has a //kind// and a //platform//:');
   D.table(['Kind', 'Platform', 'Meaning'], [
@@ -156,11 +156,21 @@ module.exports = function (D) {
   D.table(['Command', 'Effect'], [
     ['`rxpip install <name>`', 'Install the latest version of a package and everything it requires'],
     ['`rxpip install <name>==<version>`', 'Install the stated version'],
-    ['`rxpip uninstall <name>`', 'Remove a package from `lib/` and from the installed list. Packages it required are left in place.'],
+    ['`rxpip install --upgrade <name>` (or `-U`)', 'Replace an installed package by the newest version'],
+    ['`rxpip uninstall <name>`', 'Remove a package’s files and its record. Packages it required are left in place.'],
     ['`rxpip list`', 'List installed packages with their versions and summaries'],
     ['`rxpip freeze`', 'Print `name==version` for every installed package, one per line, suitable for a requirements file'],
+    ['`rxpip find [dir...] [--sync]`', 'Find every RXPIP install below the given directories (default: the current one) and the shared store; show duplicates and older copies. `--sync` brings the older copies up to the newest version found.'],
   ], [3500, 6138], 'Installing and removing packages');
-  D.p('Installing a package that is already installed does nothing except to check that its requirements are still present. Installation downloads the archive into `cache/`, unpacks it into `pkgs/` and copies its `.rexx` files into `lib/`.');
+  D.p('Installing a package that is already installed does nothing except to check that its requirements are still present. Installation downloads the archive into `cache/` and unpacks it into `pkgs/` in the RXPIP home directory.');
+  D.h3('Where packages are installed');
+  D.p('By default `install`, `uninstall`, `list`, `freeze` and `scan` work on the **current directory**. The package files are copied into it as ordinary files, and RXPIP keeps a small record of what it installed in the subdirectory `.rxpip`. Two projects can therefore hold different versions of the same package. A program in that directory can use the files like any other file in the directory, without RXPIP at run time.');
+  D.table(['Option', 'Effect'], [
+    ['`--global`, `-g`', 'Use the shared store in the RXPIP home directory (`lib/`, `installed.txt`) instead of the current directory. `run` and `build` always use the shared store.'],
+    ['`--target=DIR`, `-t DIR`', 'Use the directory DIR instead of the current directory'],
+    ['`--force`', 'Overwrite a file that RXPIP did not put there. Without it RXPIP refuses, so a file of your own with the same name is never replaced.'],
+  ], [3500, 6138], 'Scope options');
+  D.p('`rxpip find` helps when installs have spread over several directories. It lists every install it finds, marks a package that exists in more than one place and marks the copies that are older than the newest version found. `rxpip find --sync` then updates those copies in place.');
   D.h2('Version requirements');
   D.p('A package or a `REQUIRE` line can state a minimum version with `>=`:');
   D.code([

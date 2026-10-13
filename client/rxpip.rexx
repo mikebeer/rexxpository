@@ -87,6 +87,13 @@ call LoadOrInitConfig home
 parse var allargs cmd '01'x rest
 cmd = translate(cmd)
 
+/* install scope: commands that manage installed packages work on the
+   CURRENT DIRECTORY by default (files in ., record in ./.rxpip);
+   --global uses the shared store, --target DIR another directory.
+   run/build merge the shared store, so they always use it. */
+if wordpos(cmd, 'INSTALL UNINSTALL LIST FREEZE SCAN') > 0 then rest = ParseScope(rest)
+else call SetScope 'GLOBAL'
+
 select
   when cmd = 'INSTALL'   then call CmdInstall rest
   when cmd = 'UNINSTALL' then call CmdUninstall rest
@@ -95,6 +102,7 @@ select
   when cmd = 'SHOW'      then call CmdShow rest
   when cmd = 'FREEZE'    then call CmdFreeze
   when cmd = 'PATH'      then call CmdPath
+  when cmd = 'FIND'      then call CmdFind rest
   when cmd = 'SCAN'      then call CmdScan rest
   when cmd = 'RUN'       then call CmdRun rest
   when cmd = 'BUILD'     then call CmdBuild rest
@@ -123,9 +131,18 @@ CmdHelp:
   say 'RXPIP -- the REXX package manager'
   say ''
   say 'Commands:'
-  say '  install [--upgrade] <name>[==version]   install a package (and its deps); --upgrade/-U updates an installed one'
+  say '  install [--upgrade] <name>[==version]   install a package (and its deps) into the current'
+  say '                              directory; --upgrade/-U updates an installed one'
   say '  uninstall <name>            remove an installed package'
   say '  list                        list installed packages'
+  say '  find [dir...] [--sync]      find installs under dirs (default .), show duplicates/older copies;'
+  say '                              --sync brings older copies up to the newest version found'
+  say ''
+  say 'Scope options (install, uninstall, list, freeze, scan):'
+  say '  --global, -g               use the shared store (~/.rxpip/lib) instead of the current directory'
+  say '  --target=DIR, -t DIR       use directory DIR'
+  say '  --force                    overwrite files that rxpip did not install'
+  say ''
   say '  search <term>               search the repository'
   say '  show <name>                 show repository details for a package'
   say '  freeze                      print installed packages as name==version'
@@ -184,7 +201,7 @@ InstallOne: procedure expose home cfg.
   upg = cfg.UPGRADE
   cfg.UPGRADE = 0
 
-  curver = InstalledVersion(home, name)
+  curver = InstalledVersion(cfg.RECDIR, name)
   newer = 0
   if curver \= '' & upg & wantver = '' & minver = '' then do
     info0 = ServerGet(cfg.REPO_URL, 'INFO', 'name=' || UrlEncode(name))
@@ -199,7 +216,7 @@ InstallOne: procedure expose home cfg.
       /* still walk its dependencies -- they may have been individually
          uninstalled since, and "already installed" must not mean
          "assume its whole dependency tree is still intact" */
-      rec = FindInstalledRecord(home, name)
+      rec = FindInstalledRecord(cfg.RECDIR, name)
       reqs = translate(StanzaFieldPlain(rec, 'REQUIRES'), ' ', ',')
       do i = 1 to words(reqs)
         tok = word(reqs, i)
@@ -253,10 +270,22 @@ InstallOne: procedure expose home cfg.
   if curver \= '' then do
     /* replacing an older version: drop its files from lib/ first, so a
        file that no longer exists in the new version does not linger */
-    oldfiles = StanzaFieldPlain(FindInstalledRecord(home, name), 'FILES')
-    do i = 1 to words(oldfiles)
-      call DelFile home || '/lib/' || word(oldfiles, i)
+    oldfiles = StanzaFieldPlain(FindInstalledRecord(cfg.RECDIR, name), 'FILES')
+  end
+  else oldfiles = ''
+
+  /* never silently overwrite a file that rxpip did not put there */
+  if \cfg.FORCEOW then do
+    do i = 1 to words(files)
+      fn = word(files, i)
+      if FileExists(cfg.TGTDIR || '/' || fn) & wordpos(fn, oldfiles) = 0 then do
+        say "rxpip: '" || cfg.TGTDIR || '/' || fn || "' already exists and was not installed by rxpip; use --force to overwrite"
+        return seen
+      end
     end
+  end
+  do i = 1 to words(oldfiles)
+    call DelFile cfg.TGTDIR || '/' || word(oldfiles, i)
   end
 
   pkgdir = home || '/pkgs/' || name || '/' || ver
@@ -265,13 +294,14 @@ InstallOne: procedure expose home cfg.
 
   /* flatten: copy every package file (any extension: .rexx, .rex, ...) into the shared lib/ dir so that
      unqualified CALLs resolve for `rxpip run` */
-  call EnsureDir home || '/lib'
+  call EnsureDir cfg.TGTDIR
+  call EnsureDir cfg.RECDIR
   do i = 1 to words(files)
     fn = word(files, i)
-    call CopyFile pkgdir || '/' || fn, home || '/lib/' || fn
+    call CopyFile pkgdir || '/' || fn, cfg.TGTDIR || '/' || fn
   end
 
-  call RecordInstalled home, name, ver, author, summary, requires, files
+  call RecordInstalled cfg.RECDIR, name, ver, author, summary, requires, files
 
   /* recurse into dependencies: space or comma separated "name" or
      "name>=version" tokens */
@@ -287,6 +317,162 @@ InstallOne: procedure expose home cfg.
     seen = InstallOne(depspec, seen)
   end
   return seen
+
+/* ---- install scope ------------------------------------------------- */
+
+/* cfg.TGTDIR = directory that receives the package files
+   cfg.RECDIR = directory holding installed.txt for that scope
+   cfg.ISGLOBAL = 1 for the shared store */
+SetScope: procedure expose cfg. home
+  parse arg mode, dir
+  if mode = 'GLOBAL' then do
+    cfg.ISGLOBAL = 1
+    cfg.TGTDIR = home || '/lib'
+    cfg.RECDIR = home
+  end
+  else do
+    if dir = '' then dir = directory()
+    dir = translate(dir, '/', '\')
+    if length(dir) > 1 & right(dir,1) = '/' then dir = left(dir, length(dir)-1)
+    cfg.ISGLOBAL = 0
+    cfg.TGTDIR = dir
+    cfg.RECDIR = dir || '/.rxpip'
+  end
+  return
+
+/* strip --global/-g/--target=DIR/-t DIR/--force from the argument list
+   ('01'x separated) and set the scope; returns the remaining arguments */
+ParseScope: procedure expose cfg. home
+  parse arg all
+  mode = 'LOCAL'
+  dir = ''
+  kept = ''
+  do while all \= ''
+    parse var all one '01'x all
+    if one = '--global' | one = '-g' then mode = 'GLOBAL'
+    else if left(one, 9) = '--target=' then dir = substr(one, 10)
+    else if one = '-t' | one = '--target' then parse var all dir '01'x all
+    else if one = '--force' then cfg.FORCEOW = 1
+    else kept = kept || one || '01'x
+  end
+  if dir \= '' then mode = 'LOCAL'
+  call SetScope mode, dir
+  return kept
+
+/* ---- rxpip find ------------------------------------------------------ */
+
+/* list all package records under the given directories (and the shared
+   store), report packages present in several places or in different
+   versions; --sync upgrades older copies to the newest version found */
+CmdFind: procedure expose home cfg.
+  parse arg all
+  sync = 0
+  dupnames = ''
+  roots = ''
+  do while all \= ''
+    parse var all one '01'x all
+    if one = '' then iterate
+    if one = '--sync' then sync = 1
+    else roots = roots || one || '01'x
+  end
+  if roots = '' then roots = directory() || '01'x
+
+  /* locations: lines "recdir" */
+  locs = home || '0a'x
+  do while roots \= ''
+    parse var roots r '01'x roots
+    r = translate(r, '/', '\')
+    tmp = TempDir() || '/rxpip_find_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
+    if IsWindows() then ,
+      'dir /s /b "' || translate(r,'\','/') || '\installed.txt" > "' || translate(tmp,'\','/') || '" 2>nul'
+    else ,
+      'find "' || r || '" -name installed.txt -path "*/.rxpip/installed.txt" > "' || tmp || '" 2>/dev/null'
+    if FileExists(tmp) then do
+      do while lines(tmp) > 0
+        f = translate(linein(tmp), '/', '\')
+        if pos('/.rxpip/installed.txt', f) = 0 then iterate
+        d = left(f, length(f) - length('/installed.txt'))
+        if wordpos(d, translate(locs, ' ', '0a'x)) = 0 then locs = locs || d || '0a'x
+      end
+      call stream tmp, 'c', 'close'
+    end
+    call DelFile tmp
+  end
+
+  /* collect "name version recdir" entries */
+  n = 0
+  best. = ''
+  rest = locs
+  do while rest \= ''
+    parse var rest d '0a'x rest
+    if d = '' then iterate
+    idx = d || '/installed.txt'
+    if \FileExists(idx) then iterate
+    do while lines(idx) > 0
+      l = linein(idx)
+      if left(l,5) = 'NAME:' then nm = strip(substr(l,6))
+      if left(l,8) = 'VERSION:' then do
+        n = n + 1
+        ename.n = nm
+        ever.n = strip(substr(l,9))
+        edir.n = d
+        if best.nm = '' then best.nm = ever.n
+        else if CompareVersions(ever.n, best.nm) > 0 then best.nm = ever.n
+      end
+    end
+    call stream idx, 'c', 'close'
+  end
+  if n = 0 then do
+    say '(no rxpip installs found)'
+    return
+  end
+
+  say left('NAME',20) left('VERSION',12) 'LOCATION'
+  say copies('-', 70)
+  todo = 0
+  do i = 1 to n
+    nm = ename.i
+    loc = edir.i
+    if loc = home then show = '(shared store) ' || home
+    else show = left(loc, length(loc) - length('/.rxpip'))
+    note = ''
+    if CompareVersions(ever.i, best.nm) < 0 then do
+      note = '  <- older than' best.nm
+      todo = todo + 1
+      fixname.todo = nm
+      fixdir.todo = loc
+      fixver.todo = best.nm
+    end
+    say left(nm,20) left(ever.i,12) show || note
+  end
+
+  /* duplicates summary */
+  dup = 0
+  do i = 1 to n
+    c = 0
+    do j = 1 to n
+      if ename.j = ename.i then c = c + 1
+    end
+    if c > 1 & wordpos(ename.i, dupnames) = 0 then do
+      dupnames = dupnames ename.i
+      dup = dup + 1
+    end
+  end
+  say ''
+  say n 'install(s),' dup 'package(s) in more than one place,' todo 'outdated.'
+
+  if sync & todo > 0 then do
+    say ''
+    do k = 1 to todo
+      if fixdir.k = home then call SetScope 'GLOBAL'
+      else call SetScope 'LOCAL', left(fixdir.k, length(fixdir.k) - length('/.rxpip'))
+      cfg.UPGRADE = 1
+      say 'rxpip: updating' fixname.k 'in' cfg.TGTDIR
+      call InstallOne fixname.k || '==' || fixver.k, ''
+    end
+  end
+  else if todo > 0 then say "Run 'rxpip find --sync' to bring the older copies up to date."
+  return
 
 CmdPath: procedure expose home cfg.
   lib = cfg.LIB_DIR
@@ -304,7 +490,7 @@ CmdPath: procedure expose home cfg.
   end
   return
 
-CmdUninstall: procedure expose home
+CmdUninstall: procedure expose home cfg.
   parse arg name '01'x .
   name = strip(name)
   if name = '' then do
@@ -312,7 +498,7 @@ CmdUninstall: procedure expose home
     exit 1
     return
   end
-  rec = FindInstalledRecord(home, name)
+  rec = FindInstalledRecord(cfg.RECDIR, name)
   if rec = '' then do
     say "rxpip: '" || name || "' is not installed"
     exit 1
@@ -321,15 +507,15 @@ CmdUninstall: procedure expose home
   files = StanzaFieldPlain(rec, 'FILES')
   do i = 1 to words(files)
     fn = word(files, i)
-    call DelFile home || '/lib/' || fn
+    call DelFile cfg.TGTDIR || '/' || fn
   end
-  call DelTree home || '/pkgs/' || name
-  call RemoveInstalledRecord home, name
+  if cfg.ISGLOBAL then call DelTree home || '/pkgs/' || name
+  call RemoveInstalledRecord cfg.RECDIR, name
   say 'rxpip: removed' name
   return
 
-CmdList: procedure expose home
-  idx = home || '/installed.txt'
+CmdList: procedure expose home cfg.
+  idx = cfg.RECDIR || '/installed.txt'
   if \FileExists(idx) then do
     say '(no packages installed)'
     return
@@ -386,8 +572,8 @@ CmdShow: procedure expose cfg.
   call PrintStanzas resp
   return
 
-CmdFreeze: procedure expose home
-  idx = home || '/installed.txt'
+CmdFreeze: procedure expose home cfg.
+  idx = cfg.RECDIR || '/installed.txt'
   if \FileExists(idx) then return
   do while lines(idx) > 0
     l = linein(idx)
@@ -825,6 +1011,7 @@ LoadOrInitConfig: procedure expose cfg. home
   cfg.LIB_DIR = GetConfigValue(home, 'LIB_DIR')
   cfg.INTERPRETER = GetConfigValue(home, 'INTERPRETER')
   cfg.UPGRADE = 0
+  cfg.FORCEOW = 0
   return
 
 GetConfigValue: procedure
@@ -931,7 +1118,7 @@ RemoveInstalledRecord: procedure
   else call DelFile idx        /* nothing left: no empty file, no failing move */
   return
 
-RecordInstalled: procedure expose home
+RecordInstalled: procedure
   parse arg home, name, ver, author, summary, requires, files
   call RemoveInstalledRecord home, name
   idx = home || '/installed.txt'
