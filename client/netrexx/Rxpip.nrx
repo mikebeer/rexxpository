@@ -36,6 +36,7 @@ class Rxpip
     recDir   = Rexx          -- directory that holds installed.txt
     isGlobal = int 0
     forceOw  = int 0
+    readToken = Rexx ''      -- sent with every read (private packages)
     NL       = Rexx '0A'.x2c()
     SOH      = Rexx '01'.x2c()
 
@@ -59,6 +60,7 @@ class Rxpip
     mkdirs(home || '/' || lang || '/lib')
     mkdirs(home || '/' || lang || '/pkgs')
     loadConfig
+    readToken = resolveToken(String[0])
 
     cmd = Rexx(args[0]).upper
     rest = String[args.length - 1]
@@ -89,6 +91,8 @@ class Rxpip
         when cmd = 'WHOAMI'    then cmdWhoami
         when cmd = 'TOKEN'     then cmdToken(rest)
         when cmd = 'OWNER'     then cmdOwner(rest)
+        when cmd = 'VISIBILITY' then cmdVisibility(rest)
+        when cmd = 'READER'    then cmdReader(rest)
         when cmd = 'HELP'      then cmdHelp
         otherwise do
           say "rxpip: unknown command '"cmd"' -- try 'rxpip help'"
@@ -117,12 +121,14 @@ class Rxpip
     say '  scan <file.nrx>             install packages named in REQUIRE comments'
     say '  run <file.nrx> [args]       scan + auto-install, compile with the packages, run'
     say '  build <file.nrx> [--output=out.jar]   compile with the packages into a jar'
-    say '  publish <pkgfile> --name=N --version=V [...]   upload a package (needs login)'
+    say '  publish <pkgfile> --name=N --version=V [...]   upload a package (needs login); --private hides it'
     say '  register --user=U --invite=CODE   create an account (invite-only); saves your token'
     say '  login [--token=T]           save a token (or read it from env RXPIP_TOKEN)'
     say '  logout | whoami             forget / show the saved login'
     say '  token new [--label=L] | list | revoke <id>   manage your API tokens'
     say '  owner list|add|remove <pkg> [user]   manage who may publish a package'
+    say '  visibility <pkg> [public|private]   show / set whether a package is public (owners)'
+    say '  reader list|add|remove <pkg> [user]   who may read a private package besides its owners'
     say '  config get|set <key> [val]  view/change REPO_URL, LIB_DIR, INTERPRETER'
     say '  help                        this message'
     say ''
@@ -595,7 +601,7 @@ class Rxpip
   method cmdPublish(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
     if a.length < 1 | \fileExists(Rexx(a[0])) then do
       say 'usage: rxpip publish <file.rxpkg> --name=X --version=Y [--token=T]' -
-          '[--author=A --summary=S --requires=R --kind=SOURCE|BYTECODE --platform=TAG]'
+          '[--author=A --summary=S --requires=R --kind=SOURCE|BYTECODE --platform=TAG --private|--public]'
       exit 1
     end
     pkgfile = Rexx(a[0])
@@ -622,6 +628,10 @@ class Rxpip
     hdrs.add('X-Rxpip-Requires: 'opt(a, 'requires'))
     hdrs.add('X-Rxpip-Kind: 'kind)
     hdrs.add('X-Rxpip-Platform: 'platform)
+    loop pi = 0 to a.length - 1
+      if Rexx(a[pi]) = '--private' then hdrs.add('X-Rxpip-Visibility: private')
+      if Rexx(a[pi]) = '--public' then hdrs.add('X-Rxpip-Visibility: public')
+    end
     sec = ArrayList()
     sec.add('X-Rxpip-Token: 'token)
     exit showResponse(serverPost('PUBLISH', '', hdrs, sec, pkgfile))
@@ -724,6 +734,35 @@ class Rxpip
     hdrs.add('X-Rxpip-Name: 'pkg)
     hdrs.add('X-Rxpip-User: 'who)
     exit showResponse(authCall(sub'OWNER', hdrs))
+
+  method cmdVisibility(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    pkg = argAt(a, 0)
+    val = argAt(a, 1).lower
+    if pkg = '' | (val \= '' & val \= 'public' & val \= 'private') then do
+      say 'usage: rxpip visibility <pkg> [public|private]'
+      exit 1
+    end
+    hdrs = ArrayList()
+    hdrs.add('X-Rxpip-Name: 'pkg)
+    if val = '' then exit showResponse(authCall('READERS', hdrs))
+    hdrs.add('X-Rxpip-Value: 'val)
+    exit showResponse(authCall('VISIBILITY', hdrs))
+
+  method cmdReader(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    sub = argAt(a, 0).upper
+    pkg = argAt(a, 1)
+    who = argAt(a, 2)
+    if pkg = '' | (sub \= 'LIST' & who = '') | (sub \= 'LIST' & sub \= 'ADD' & sub \= 'REMOVE') then do
+      say 'usage: rxpip reader list <pkg> | add <pkg> <user> | remove <pkg> <user>'
+      exit 1
+    end
+    act = Rexx 'READERS'
+    if sub = 'ADD' then act = 'ADDREADER'
+    if sub = 'REMOVE' then act = 'REMOVEREADER'
+    hdrs = ArrayList()
+    hdrs.add('X-Rxpip-Name: 'pkg)
+    hdrs.add('X-Rxpip-User: 'who)
+    exit showResponse(authCall(act, hdrs))
 
   method cmdConfig(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
     sub = argAt(a, 0).upper
@@ -841,13 +880,40 @@ class Rxpip
   method serverGet(action=Rexx, extra=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
     url = repoUrl'?action='action
     if extra \= '' then url = url'&'extra
-    return exec(['curl', '-s', url])
+    hfp = readHdrFile()
+    if hfp = '' then return exec(['curl', '-s', url])
+    r = exec(['curl', '-s', '-H', '@'hfp, url])
+    deletePath(hfp)
+    return r
+
+  -- a private temporary header file carrying the token for a read request
+  -- (private packages), or '' without a token; never on a command line
+  method readHdrFile static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    if readToken = '' then return ''
+    hf = File.createTempFile('rxpip_hdr_', '.tmp')
+    if \isWindows then do
+      do
+        perms = java.util.HashSet()
+        perms.add(java.nio.file.attribute.PosixFilePermission.OWNER_READ)
+        perms.add(java.nio.file.attribute.PosixFilePermission.OWNER_WRITE)
+        Files.setPosixFilePermissions(hf.toPath(), perms)
+      catch Exception
+        nop
+      end
+    end
+    Files.write(hf.toPath(), ('X-Rxpip-Token: 'readToken || NL || NL).toString.getBytes('UTF-8'), OpenOption[0])
+    return Rexx(hf.getPath())
 
   method serverDownload(name=Rexx, ver=Rexx, kind=Rexx, platform=Rexx, outfile=Rexx) static returns int signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
     url = repoUrl'?action=DOWNLOAD&name='urlEnc(name)
     if ver \= '' then url = url'&version='urlEnc(ver)
     url = url'&kind='urlEnc(kind)'&platform='urlEnc(platform)
-    exec(['curl', '-s', '-f', '-o', outfile, url])
+    hfp = readHdrFile()
+    if hfp = '' then exec(['curl', '-s', '-f', '-o', outfile, url])
+    else do
+      exec(['curl', '-s', '-f', '-o', outfile, '-H', '@'hfp, url])
+      deletePath(hfp)
+    end
     return lastRc
 
   /* POST. hdrs: ordinary "Name: value" headers; secrets: header lines that

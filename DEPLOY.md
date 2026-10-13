@@ -219,6 +219,31 @@ It needs a working local MTA: `dnf install postfix && systemctl enable --now pos
 message on stdin). On SELinux add `setsebool -P httpd_can_sendmail 1`.
 Set SPF/DKIM for the sender domain, or the mails land in spam.
 
+### Private packages and a closed repository (optional)
+
+A package published with `--private` (or switched with `rxpip visibility`) is
+invisible to everyone except its owners and the users on its reader list:
+`LIST`, `SEARCH`, `INFO`, `VERSIONS`, `ARTIFACTS`, `DOWNLOAD`, `OWNERS` and the
+web pages answer exactly as for a package that does not exist. The clients send
+their token with every read, so the same `rxpip install` works for people who
+may see the package. The state lives in `repo/.auth/visibility/` and
+`repo/.auth/readers/` (back it up with the rest of `.auth/`). A public package
+cannot require a private one (publishing is refused with `PRIVATE_DEPENDENCY`).
+
+To make the **whole repository** private, set (in both virtual-host files):
+
+```apache
+    SetEnv RXPIP_CLOSED 1
+```
+
+Every read then needs a valid token (HTTP 401 otherwise); only `PING`, the
+sign-up form and `REGISTER` stay open, and the web pages show a short
+"private repository" notice. Private packages inside a closed repository still
+stay hidden from users who are not owners or readers. The browser views do
+not send a token, so they list public packages only (or nothing, when closed).
+Administrators can inspect or set visibility on the server with
+`admin visibility <pkg> [public|private]`.
+
 ## 9. Header forwarding
 
 `PUBLISH` metadata and the token are read from `X-Rxpip-*` request

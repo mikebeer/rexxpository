@@ -336,6 +336,10 @@ module.exports = function (D) {
     'NAME: mathutils',
     'OWNERS: bob',
   ], 'Managing owners');
+  D.h2('Private packages');
+  D.p('A package can be hidden from the public. Publish it with `--private`, or change it later with `rxpip visibility <pkg> private`. A private package does not appear in lists, searches, the web pages or downloads for anyone except its owners and the users you add as readers (`rxpip reader add <pkg> <user>`). To everybody else the server answers exactly as for a package that does not exist, so the name cannot be found out by trying. The clients send your saved token with every request, so `rxpip install` and `rxpip search` work for you as they do for a public package.');
+  D.p('A public package cannot require a private one, because anonymous users could not install it; publishing is refused with `PRIVATE_DEPENDENCY`. A private package can require both kinds.');
+  D.p('An administrator can also make the **whole repository** private (the setting `RXPIP_CLOSED`, described in the chapter on running the server). Then every read needs a valid token and the web pages show only a notice. The browser views do not send a token, so they list public packages only.');
   D.code([
     '$ rxpip token new --label=ci',
     'STATUS: OK',
@@ -459,6 +463,8 @@ module.exports = function (D) {
     'SetEnv RXPIP_MAIL_FROM    rxpip@rexxpository.org',
   ], 'Enabling sign-up requests');
   D.p('`RXPIP_ADMIN_EMAIL` receives the review links. `RXPIP_PUBLIC_URL` is the full address of the CGI program and is used to build those links, so that they never depend on a client-supplied host name. `RXPIP_MAIL_FROM` is the sender. Set up SPF and DKIM for the sender domain, or the mails may be filed as spam. `RXPIP_SENDMAIL` can name another command that reads a finished message on standard input.');
+  D.h3('Private packages and a closed repository');
+  D.p('Visibility is kept in `repo/.auth/visibility/` and `repo/.auth/readers/`; back them up with the rest of `.auth/`. To make the whole repository private, add `SetEnv RXPIP_CLOSED 1` to both virtual-host files. Every read then needs a valid token (HTTP 401 otherwise); only `PING`, the sign-up form and `REGISTER` stay open. On the server, `admin visibility <pkg> [public|private]` shows or changes a package’s visibility.');
   D.h2('The first account');
   D.p('Create your own account on the server (the command prints the token once, so copy it):');
   D.code([
@@ -556,6 +562,8 @@ module.exports = function (D) {
     ['`TOKENS`', '—', 'Id, label and creation date of your tokens'],
     ['`REVOKE`', '`X-Rxpip-Token-Id`', 'Revokes one of your tokens'],
     ['`ADDOWNER`, `REMOVEOWNER`', '`X-Rxpip-Name`, `X-Rxpip-User`', 'The resulting owner list'],
+    ['`VISIBILITY`', '`X-Rxpip-Name`, `X-Rxpip-Value` (`public` or `private`)', 'Sets the visibility (owners only)'],
+    ['`READERS`, `ADDREADER`, `REMOVEREADER`', '`X-Rxpip-Name`, `X-Rxpip-User`', 'The visibility and reader list (owners only)'],
     ['`PUBLISH`', '`X-Rxpip-Name`, `-Version`, `-Author`, `-Summary`, `-Requires`, `-Kind`, `-Platform`; body: the archive bytes', 'Stores the artifact'],
   ], [2400, 4400, 2838], 'Actions that need a token');
   D.p('For `PUBLISH`, the non-secret metadata may alternatively be given as query-string parameters of the same names, for the benefit of intermediaries that drop custom headers; headers win when both are present. The token has no such alternative.');
@@ -661,6 +669,9 @@ module.exports = function (D) {
     ['`rxpip owner list <pkg>`', 'Show the owners of a package'],
     ['`rxpip owner add <pkg> <user>`', 'Add an owner'],
     ['`rxpip owner remove <pkg> <user>`', 'Remove an owner'],
+    ['`rxpip publish <file> ... --private`', 'Publish a package that only its owners and readers can see'],
+    ['`rxpip visibility <pkg> [public|private]`', 'Show or change a package’s visibility (owners)'],
+    ['`rxpip reader list|add|remove <pkg> [<user>]`', 'Who else may read a private package'],
     ['`rxpip config [get <key> | set <key> <value>]`', 'Show or change settings'],
   ], [4600, 5038], 'Client commands');
 
@@ -687,6 +698,7 @@ module.exports = function (D) {
     ['`RXPIP_REPO_ROOT`', 'server', 'Directory holding the repository data'],
     ['`RXPIP_MAX_UPLOAD`', 'server', 'Largest accepted upload in bytes (default 5242880)'],
     ['`RXPIP_ADMIN_EMAIL`', 'server', 'Where sign-up review mails go; sign-up is off while unset'],
+    ['`RXPIP_CLOSED`', 'server', '`1` makes the whole repository private: every read needs a token'],
     ['`RXPIP_PUBLIC_URL`', 'server', 'Full address of the CGI program, used in mailed links'],
     ['`RXPIP_MAIL_FROM`', 'server', 'Sender address of the mails (default rxpip@<server name>)'],
     ['`RXPIP_SENDMAIL`', 'server', 'Mail command (default `/usr/sbin/sendmail -t -i`)'],

@@ -17,7 +17,7 @@
    * Needs rxc, rxas and rxvm on the PATH (or CREXX_HOME/bin) for run/build.
    --------------------------------------------------------------------- */
 options levelb
-namespace rxpip expose home lang repoUrl NL SOH lastrc upgrade tgtDir recDir isGlobal forceOw
+namespace rxpip expose home lang repoUrl NL SOH lastrc upgrade tgtDir recDir isGlobal forceOw readToken
 import rxfnsb
 
 main: procedure = .int
@@ -28,6 +28,7 @@ main: procedure = .int
   lastrc = 0
   upgrade = 0
   forceOw = 0
+  readToken = ''
   isGlobal = 0
   tgtDir = ''
   recDir = ''
@@ -41,6 +42,8 @@ main: procedure = .int
   call mkdirs(home || '/' || lang || '/lib')
   call mkdirs(home || '/' || lang || '/pkgs')
   call loadConfig
+  emptyArgs = .string[]
+  readToken = resolveToken(emptyArgs)     /* sent with every read, for private packages */
   if a.0 < 1 then do
     call cmdHelp
     return 0
@@ -73,6 +76,8 @@ main: procedure = .int
     when cmd = 'WHOAMI'    then return cmdWhoami()
     when cmd = 'TOKEN'     then return cmdToken(rest)
     when cmd = 'OWNER'     then return cmdOwner(rest)
+    when cmd = 'VISIBILITY' then return cmdVisibility(rest)
+    when cmd = 'READER'    then return cmdReader(rest)
     when cmd = 'HELP'      then call cmdHelp
     otherwise do
       say "rxpip: unknown command '" || cmd || "' -- try 'rxpip help'"
@@ -103,6 +108,8 @@ cmdHelp: procedure = .void
   say '  logout | whoami             forget / show the saved login'
   say '  token new [--label=L] | list | revoke <id>   manage your API tokens'
   say '  owner list|add|remove <pkg> [user]   manage who may publish a package'
+  say '  visibility <pkg> [public|private]   show / set whether a package is public (owners)'
+  say '  reader list|add|remove <pkg> [user]   who may read a private package besides its owners'
   say '  config get|set <key> [val]  view/change REPO_URL, LIB_DIR, INTERPRETER'
   say '  help                        this message'
   say ''
@@ -680,11 +687,11 @@ cmdBuild: procedure = .int
 cmdPublish: procedure = .int
   arg a = .string[]
   if a.0 < 1 then do
-    say 'usage: rxpip publish <file.rxpkg> --name=X --version=Y [--token=T] [--author=A --summary=S --requires=R --kind=SOURCE|BYTECODE --platform=TAG]'
+    say 'usage: rxpip publish <file.rxpkg> --name=X --version=Y [--token=T] [--author=A --summary=S --requires=R --kind=SOURCE|BYTECODE --platform=TAG --private|--public]'
     return 1
   end
   if \fileExists(a[1]) then do
-    say 'usage: rxpip publish <file.rxpkg> --name=X --version=Y [--token=T] [--author=A --summary=S --requires=R --kind=SOURCE|BYTECODE --platform=TAG]'
+    say 'usage: rxpip publish <file.rxpkg> --name=X --version=Y [--token=T] [--author=A --summary=S --requires=R --kind=SOURCE|BYTECODE --platform=TAG --private|--public]'
     return 1
   end
   pkgfile = a[1]
@@ -711,6 +718,10 @@ cmdPublish: procedure = .int
   hdrs[5] = 'X-Rxpip-Requires: ' || opt(a, 'requires')
   hdrs[6] = 'X-Rxpip-Kind: ' || kind
   hdrs[7] = 'X-Rxpip-Platform: ' || platform
+  do j = 1 to a.0
+    if a[j] = '--private' then hdrs[8] = 'X-Rxpip-Visibility: private'
+    if a[j] = '--public' then hdrs[8] = 'X-Rxpip-Visibility: public'
+  end
   sec = .string[]
   sec[1] = 'X-Rxpip-Token: ' || token
   return showResponse(serverPost('PUBLISH', '', hdrs, sec, pkgfile))
@@ -838,6 +849,49 @@ cmdOwner: procedure = .int
   hdrs[1] = 'X-Rxpip-Name: ' || pkg
   hdrs[2] = 'X-Rxpip-User: ' || who
   return showResponse(authCall(sub || 'OWNER', hdrs))
+
+cmdVisibility: procedure = .int
+  arg a = .string[]
+  pkg = ''
+  val = ''
+  if a.0 > 0 then pkg = a[1]
+  if a.0 > 1 then val = lower(a[2])
+  bad = 0
+  if pkg = '' then bad = 1
+  if val \= '' & val \= 'public' & val \= 'private' then bad = 1
+  if bad then do
+    say 'usage: rxpip visibility <pkg> [public|private]'
+    return 1
+  end
+  hdrs = .string[]
+  hdrs[1] = 'X-Rxpip-Name: ' || pkg
+  if val = '' then return showResponse(authCall('READERS', hdrs))
+  hdrs[2] = 'X-Rxpip-Value: ' || val
+  return showResponse(authCall('VISIBILITY', hdrs))
+
+cmdReader: procedure = .int
+  arg a = .string[]
+  sub = ''
+  pkg = ''
+  who = ''
+  if a.0 > 0 then sub = upper(a[1])
+  if a.0 > 1 then pkg = a[2]
+  if a.0 > 2 then who = a[3]
+  bad = 0
+  if pkg = '' then bad = 1
+  if sub \= 'LIST' & sub \= 'ADD' & sub \= 'REMOVE' then bad = 1
+  if sub \= 'LIST' & who = '' then bad = 1
+  if bad then do
+    say 'usage: rxpip reader list <pkg> | add <pkg> <user> | remove <pkg> <user>'
+    return 1
+  end
+  act = 'READERS'
+  if sub = 'ADD' then act = 'ADDREADER'
+  if sub = 'REMOVE' then act = 'REMOVEREADER'
+  hdrs = .string[]
+  hdrs[1] = 'X-Rxpip-Name: ' || pkg
+  hdrs[2] = 'X-Rxpip-User: ' || who
+  return showResponse(authCall(act, hdrs))
 
 cmdConfig: procedure = .void
   arg a = .string[]
@@ -971,6 +1025,16 @@ serverGet: procedure = .string
   argv[1] = 'curl'
   argv[2] = '-s'
   argv[3] = url
+  if readToken \= '' then do
+    hf = home || '/rhdr_' || pid() || '.tmp'
+    call writePrivate(hf, 'X-Rxpip-Token: ' || readToken || NL || NL)
+    argv[3] = '-H'
+    argv[4] = '@' || hf
+    argv[5] = url
+    res = exec(argv)
+    call rmfile(hf)
+    return res
+  end
   return exec(argv)
 
 serverDownload: procedure = .int
@@ -985,6 +1049,16 @@ serverDownload: procedure = .int
   argv[4] = '-o'
   argv[5] = outfile
   argv[6] = url
+  if readToken \= '' then do
+    hf = home || '/rhdr_' || pid() || '.tmp'
+    call writePrivate(hf, 'X-Rxpip-Token: ' || readToken || NL || NL)
+    argv[6] = '-H'
+    argv[7] = '@' || hf
+    argv[8] = url
+    tmp = exec(argv)
+    call rmfile(hf)
+    return lastrc
+  end
   tmp = exec(argv)
   return lastrc
 

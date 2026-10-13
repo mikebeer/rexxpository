@@ -456,6 +456,20 @@ scope), `StoreExists`/`StoreCopyIn`/`StoreDelete`/`StoreMake` (package
 files). The registry (find, remove, record, summary) works on the record
 text only. A new environment supplies these routines and `SetScope`.
 
+### Private packages and the closed repository
+
+Per package, under `.auth/` (never served): `visibility/<pkg>.vis` (present
+and `private` = hidden) and `readers/<pkg>.readers` (users allowed to read
+besides the owners). Reads carry the token in `X-Rxpip-Token`; `Viewer()`
+turns it into a user, `CanRead()` decides, and every read action asks it. A
+hidden package yields the same answer as a missing one (404 / `NOT_FOUND` /
+`COUNT: 0`), so names cannot be probed. `RXPIP_CLOSED=1` adds a gate in front
+of every read (`NO_TOKEN`, HTTP 401). The visibility is stored before the
+first artifact of a new private package is moved into place, so it is never
+readable even briefly. A public package may not require a private one. The
+clients read the token once at start (`--token`, `RXPIP_TOKEN`, saved login)
+and pass it to curl through the same private header file as for publishing.
+
 ### VM/370plus
 
 *Existing route.* mikebeer/vm370plus (`arch/31bit/linux390/rxpip`) already

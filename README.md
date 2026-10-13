@@ -92,6 +92,9 @@ rxpip publish mypkg-1.0.0.rxpkg \
   --summary="what it does" --requires="otherpkg>=1.0.0"
 rxpip token new --label=ci | list | revoke <id>  # manage your API tokens
 rxpip owner add|remove|list mypkg [user]         # who may publish mypkg
+rxpip publish mypkg-1.0.0.rxpkg --name=mypkg --version=1.0.0 --private   # hidden from the public
+rxpip visibility mypkg [public|private]          # show / change (owners)
+rxpip reader add|remove|list mypkg [user]        # who else may read a private package
 rxpip whoami | logout
 ```
 
