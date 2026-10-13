@@ -244,6 +244,36 @@ not send a token, so they list public packages only (or nothing, when closed).
 Administrators can inspect or set visibility on the server with
 `admin visibility <pkg> [public|private]`.
 
+### Administrators, usage statistics and client releases
+
+Make yourself an administrator (the user must exist):
+
+```sh
+sudo -u apache env RXPIP_REPO_ROOT=/var/www/rexxpository.org/repo \
+    regina -a /var/www/rexxpository.org/cgi-bin/rxpip_server.rexx admin addadmin <user>
+```
+
+From then on `rxpip admin stats [--days=N]`, `rxpip admin users`,
+`rxpip admin lock <user>` and `rxpip admin client-publish <kind> --version=V
+[--min=V] <file>...` work with that user's token from any computer (the same
+`stats [days]`, `admins`, `rmadmin <user>` exist as local admin commands). The
+administrator list is `repo/.auth/admins`.
+
+Every request is logged to `repo/.stats/<yyyymmdd>.log` (time, action, client
+kind/version/OS, and a daily id that is a hash of address+day+secret salt; no
+addresses, tokens or user names). Logs older than 400 days are deleted. They are
+only readable by administrators (dot-directories are never served). Set
+`SetEnv RXPIP_NOSTATS 1` in both virtual-host files to switch it off. The
+directory must be writable by the web user, like the rest of `repo/`.
+
+Client releases live in `repo/.clients/<kind>/<version>/` (kinds: `regina`,
+`oorexx`, `netrexx`, `crexx`), with `LATEST` per kind. Publish a release from a
+checkout, e.g. `rxpip admin client-publish regina --version=1.3.0 --min=1.0.0
+client/rxpip.rexx` (and again with `oorexx`; `client/netrexx/Rxpip.nrx` for
+`netrexx`, `client/crexx/rxpip.crexx` for `crexx`). The public action `CLIENT`
+serves them, also in a closed repository. Remember to raise `ClientVersion` in
+the client source before releasing. Back up `.stats/` and `.clients/` with the rest of `repo/`.
+
 ## 9. Header forwarding
 
 `PUBLISH` metadata and the token are read from `X-Rxpip-*` request

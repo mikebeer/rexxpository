@@ -25,6 +25,7 @@ module.exports = function (D) {
   D.h3('Summary of changes');
   D.p('This edition is kept up to date as RXPIP grows; each change is listed here, newest first.');
   D.bullets([
+    '**13 October 2026 (third edition).** Per-package private visibility and a closed-repository mode; install into the current directory with per-directory records, `rxpip find`, `--global` and `--target`; client version checking and self-update (`rxpip update`); usage statistics and an administrator role (`rxpip admin ...`).',
     '**12 October 2026 (second edition).** Clients for ooRexx, NetRexx and cREXX in addition to Regina (artifact platforms `any`, `netrexx`, `crexx`); moderated sign-up through the web interface, with an approval mail to the administrator; a test matrix that runs one scenario against every client.',
     '**12 October 2026 (first edition).** First edition. Covers the server and client as they stand after the hardening work of early October: header-only tokens, invitation-only accounts, per-package owner lists, upload limits, archive checks, the read-only web interface, and `>=` version requirements in `REQUIRE` lines.',
   ]);
@@ -130,6 +131,12 @@ module.exports = function (D) {
     ['`credentials.txt`', 'Your saved login for each repository (created by `rxpip register` or `rxpip login`; mode 600 on Linux and macOS)'],
   ], [2900, 6738], 'Contents of the client home directory');
   D.note('`credentials.txt` holds a secret. Do not put it in version control or share it. On Windows the file cannot be restricted by mode and relies on the permissions of your user profile.');
+
+  D.h2('Keeping the client up to date');
+  D.p('Every request carries a short note of which client is asking, for example `regina/1.2.0 (linux)`: the kind of client, its version and the operating system. Nothing else about your computer is sent. The server compares nothing and refuses nothing; it only records the note (see the section on usage statistics in Chapter 10).');
+  D.p('`rxpip update --check` asks the repository for the newest release of your kind of client and says whether you are behind. `rxpip update` downloads the release and replaces the client files in the folder from which the client runs (for the NetRexx and cREXX clients, the launcher compiles the new source the next time you start it). The files are downloaded under a temporary name first, so a failed download leaves the old client working. If the folder is not writable for you, the update stops with a message; repeat it as the owner of the folder.');
+  D.p('Once a day, when you use `install`, `search`, `show` or `run`, the client also looks for a newer release and prints one line on the error output if there is one: `rxpip: version 1.3.0 is available (you have 1.2.0). Run: rxpip update`. (The cREXX client prints it on the normal output and not before `run`.) If the repository has declared a minimum version and yours is older, the message says that your client is too old. Two settings control this: `rxpip config set CLIENT_CHECK off` switches the daily look off (the environment variable `RXPIP_NO_UPDATE_CHECK=1` does so for one run), and `rxpip config set AUTOUPDATE 1` installs a newer release at once instead of only announcing it.');
+  D.note('Self-update replaces program files, so it is carried out only over HTTPS (or against a server on the same computer). A repository that you reach over plain HTTP is never used to update the client.');
 
   // ------------------------------------------------------------ Chapter 3
   D.chapter('Using Packages');
@@ -524,6 +531,29 @@ module.exports = function (D) {
     ['Large uploads fail with HTTP 413', 'Over `RXPIP_MAX_UPLOAD` or Apache’s `LimitRequestBody`'],
   ], [3700, 5938], 'Troubleshooting guide');
 
+  D.h2('Administrators and the statistics');
+  D.p('Most administration is done on the server itself. Some of it can also be done from your own computer, by users that have been made **administrators**: `admin addadmin <user>` on the server marks a user, `admin rmadmin <user>` removes the right again, and `admin admins` lists them. An administrator’s ordinary token then works for the `rxpip admin` commands; nobody else can use them, and nothing in this section is reachable without such a token. The list of administrators is the file `.auth/admins`.');
+  D.table(['Client command', 'What it does'], [
+    ['`rxpip admin stats [--days=N]`', 'Show the usage statistics for the last N days (default 30, at most 400)'],
+    ['`rxpip admin users`', 'List the users, the number of tokens each has, and who is an administrator'],
+    ['`rxpip admin lock <user>`', 'Revoke every token of a user at once'],
+    ['`rxpip admin client-publish <kind> --version=V [--min=V] <file>...`', 'Publish a new release of a client'],
+  ], [4200, 5438], 'Remote administration');
+  D.p('The same report is available on the server as `admin stats [days]`.');
+  D.h3('What the statistics show');
+  D.bullets([
+    'the number of requests, downloads and publishes in the period, and the requests and distinct clients per day;',
+    'the clients in use, by kind, version and operating system, counted in //client-days// (one client seen on one day counts once); a star marks every kind and version that is older than the newest release;',
+    'the most downloaded packages, with the number of downloads and of distinct client-days.',
+  ]);
+  D.p('The raw data is one text file per day, `repo/.stats/<yyyymmdd>.log`. Files older than 400 days are deleted automatically. Setting `RXPIP_NOSTATS` to `1` in the virtual host switches the recording off. The directory is not served to the public (names beginning with a dot are never listed) and the statistics can be read only by an administrator.');
+  D.h3('Releasing a new client version');
+  D.p('A client release is a small set of files, tagged with a kind (`regina`, `oorexx`, `netrexx` or `crexx`) and a version. To release version 1.3.0 of the Regina client, change the version number in the client (`ClientVersion` in `rxpip.rexx`), commit it, and publish it from your checkout:');
+  D.code([
+    '$ rxpip admin client-publish regina --version=1.3.0 --min=1.0.0 client/rxpip.rexx',
+  ], 'Publishing a client release');
+  D.p('The ooRexx client uses the same file as the Regina client but is a separate kind, so publish it a second time with `oorexx` as the kind. For NetRexx publish `client/netrexx/Rxpip.nrx`, for cREXX `client/crexx/rxpip.crexx`. `--min` names the oldest client that still works; older clients are told that they are too old. A release can never be overwritten, and the "latest" pointer only moves forward. Releases are kept in `repo/.clients/<kind>/<version>/`; back that directory up with the rest of the repository. Clients fetch them with the public action `CLIENT`, which stays open even when the repository is closed, because a client must always be able to update itself.');
+
   // ------------------------------------------------------------ Chapter 9
   D.chapter('Protocol Reference');
   D.p('The client and the web interface use one HTTP interface, so other clients can be written in any language. Every request is addressed to the CGI program, with the action in the query string: `https://host/cgi-bin/rxpip_server.rexx?action=<ACTION>&...`.');
@@ -540,6 +570,7 @@ module.exports = function (D) {
     'REQUIRES:',
   ], 'A list response');
   D.p('Errors of the actions that change something also carry a real HTTP status code (see the error table at the end of this chapter). `DOWNLOAD` returns the raw archive with `Content-Type: application/octet-stream`.');
+  D.p('Clients add the header `X-Rxpip-Client: <kind>/<version> (<os>)` to every request. It is optional and used only for the statistics.');
   D.h2('Actions without a login');
   D.table(['Action', 'Method', 'Parameters', 'Result'], [
     ['(none)', 'GET', '`q`', 'HTML package index'],
@@ -553,6 +584,7 @@ module.exports = function (D) {
     ['`DOWNLOAD`', 'GET', '`name`, `version`, `kind`, `platform`', 'The archive (defaults: latest, `SOURCE`, `any`)'],
     ['`OWNERS`', 'GET', '`name`', 'Space-separated owner list'],
     ['`REGISTER`', 'POST', 'headers `X-Rxpip-Invite`, `X-Rxpip-User`', 'New user and first token'],
+    ['`CLIENT`', 'GET', '`kind`, `version`, `file`', 'Without `file`: the manifest of a client release (`VERSION`, `LATEST`, `MIN`, `FILES`); with `file`: that file. Also open in a closed repository'],
   ], [1500, 900, 3400, 3838], 'Actions that need no token');
   D.h2('Actions that need a token');
   D.p('These are POST requests with the header `X-Rxpip-Token: <token>`. A token in the query string is refused.');
@@ -566,6 +598,14 @@ module.exports = function (D) {
     ['`READERS`, `ADDREADER`, `REMOVEREADER`', '`X-Rxpip-Name`, `X-Rxpip-User`', 'The visibility and reader list (owners only)'],
     ['`PUBLISH`', '`X-Rxpip-Name`, `-Version`, `-Author`, `-Summary`, `-Requires`, `-Kind`, `-Platform`; body: the archive bytes', 'Stores the artifact'],
   ], [2400, 4400, 2838], 'Actions that need a token');
+  D.h2('Administrator actions');
+  D.p('These are POST requests with the token of an administrator; anyone else receives `FORBIDDEN` (HTTP 403).');
+  D.table(['Action', 'Headers', 'Result'], [
+    ['`ADMINSTATS`', '`X-Rxpip-Days` (optional)', 'The statistics report'],
+    ['`ADMINUSERS`', '—', 'Users, token counts, administrators'],
+    ['`ADMINLOCK`', '`X-Rxpip-User`', 'Revokes all tokens of the user'],
+    ['`ADMINCLIENT`', '`X-Rxpip-Kind`, `-Version`, `-Min` (optional); body: a gzip tar of the release files', 'Stores a client release; releases are immutable'],
+  ], [2400, 4400, 2838], 'Administrator actions');
   D.p('For `PUBLISH`, the non-secret metadata may alternatively be given as query-string parameters of the same names, for the benefit of intermediaries that drop custom headers; headers win when both are present. The token has no such alternative.');
   D.h2('Error codes');
   D.table(['Code', 'HTTP', 'Meaning'], [
@@ -609,6 +649,14 @@ module.exports = function (D) {
   ]);
   D.h2('The web pages');
   D.p('All metadata is escaped, and a content security policy forbids scripts and external resources.');
+  D.h2('Usage statistics and privacy');
+  D.bullets([
+    'The client announces its kind, version and operating system in a request header. The server records, for each request, the time, the action, that note and a //daily client id//; for each download or publish also the package, version and artifact.',
+    'The daily client id is the first 12 characters of a SHA-256 hash of the network address, the date and a secret salt kept on the server. It lets the report count distinct clients, but it contains no address, cannot be turned back into one without the salt, and is different on every day, so a client cannot be followed from one day to the next.',
+    'Tokens, user names and search words are never recorded. `PING` and the web pages are not recorded.',
+    'The data is readable only by administrators, and deleted after 400 days. The operator can switch it off with `RXPIP_NOSTATS=1`. The web server’s own access log, which Apache keeps anyway, contains the network address and the request line; the retention of that log is a separate decision of the operator.',
+    'Administrators are trusted accounts: an administrator can read the statistics, lock users and publish client releases that other people’s clients will install when they run `rxpip update`. Give the right only to people who already control the server, protect their tokens like the server’s own keys, and use HTTPS only.',
+  ]);
   D.h2('What RXPIP does not protect against');
   D.bullets([
     '**A malicious package.** The repository checks the shape of an archive, not what the REXX code does. Treat a package as you would any program you download. Prefer packages whose source you have read, and use `rxpip build` to look at the merged program.',
@@ -620,7 +668,7 @@ module.exports = function (D) {
   // ------------------------------------------------------------ Chapter 11
   D.chapter('Restrictions and Known Problems');
   D.h2('What has been tested');
-  D.p('The server and the Regina client, on Linux, are covered by an automated test suite of 180 checks, and a second suite runs one scenario of about 35 checks against each of the four clients (141 checks in all, with Regina, ooRexx, NetRexx and cREXX installed). All run against the real programs over HTTP, using a test harness that behaves like Apache (it forwards all request headers and runs the program as an ordinary user). The suite covers publishing, immutability, upload limits, archive attacks, invitations, tokens, owners, concurrent first publishes, the web pages, the client commands and the moderated sign-up (with a stand-in for sendmail that stores the mails).');
+  D.p('The server and the Regina client, on Linux, are covered by an automated test suite of 260 checks, and a second suite runs one scenario of about 85 checks against each of the four clients (357 checks in all, with Regina, ooRexx, NetRexx and cREXX installed). All run against the real programs over HTTP, using a test harness that behaves like Apache (it forwards all request headers and runs the program as an ordinary user). The suite covers publishing, immutability, upload limits, archive attacks, invitations, tokens, owners, concurrent first publishes, the web pages, the client commands and the moderated sign-up (with a stand-in for sendmail that stores the mails).');
   D.h2('What has not been tested');
   D.bullets([
     '**Windows.** The client and server contain Windows code paths (PowerShell for hashing and random numbers, `cmd.exe` commands for files). They were written with care but have never been run. On Windows the server cannot create a file atomically, so two simultaneous first publishes of one name, or two simultaneous uses of one invitation, are not race-safe. The installation checklist for Windows is in the repository file `DEPLOY.md`.',
@@ -672,7 +720,12 @@ module.exports = function (D) {
     ['`rxpip publish <file> ... --private`', 'Publish a package that only its owners and readers can see'],
     ['`rxpip visibility <pkg> [public|private]`', 'Show or change a package’s visibility (owners)'],
     ['`rxpip reader list|add|remove <pkg> [<user>]`', 'Who else may read a private package'],
-    ['`rxpip config [get <key> | set <key> <value>]`', 'Show or change settings'],
+    ['`rxpip update [--check]`', 'Look for a newer client release and install it (with `--check`, only report)'],
+    ['`rxpip admin stats [--days=N]`', 'Usage statistics (administrators)'],
+    ['`rxpip admin users`', 'List users (administrators)'],
+    ['`rxpip admin lock <user>`', 'Revoke every token of a user (administrators)'],
+    ['`rxpip admin client-publish <kind> --version=V [--min=V] <file>...`', 'Publish a client release (administrators)'],
+    ['`rxpip config [get <key> | set <key> <value>]`', 'Show or change settings (also `CLIENT_CHECK`, `AUTOUPDATE`)'],
   ], [4600, 5038], 'Client commands');
 
   D.chapter('Server Administration Commands', { appendix: 'B' });
@@ -687,6 +740,11 @@ module.exports = function (D) {
     ['`lock <user>`', 'Revoke every token of a user'],
     ['`owners <package>`', 'Show the owners of a package'],
     ['`setowners <package> <user> [<user>...]`', 'Replace the owner list (account recovery)'],
+    ['`visibility <package> [public|private]`', 'Show or set the visibility of a package'],
+    ['`addadmin <user>`', 'Make a user an administrator (remote administration, statistics)'],
+    ['`rmadmin <user>`', 'Remove the administrator right'],
+    ['`admins`', 'List the administrators'],
+    ['`stats [days]`', 'Print the usage statistics'],
   ], [4000, 5638], 'Administration commands');
 
   D.chapter('Environment Variables and Files', { appendix: 'C' });
@@ -698,6 +756,9 @@ module.exports = function (D) {
     ['`RXPIP_REPO_ROOT`', 'server', 'Directory holding the repository data'],
     ['`RXPIP_MAX_UPLOAD`', 'server', 'Largest accepted upload in bytes (default 5242880)'],
     ['`RXPIP_ADMIN_EMAIL`', 'server', 'Where sign-up review mails go; sign-up is off while unset'],
+    ['`RXPIP_NOSTATS`', 'server', '`1` switches the usage statistics off'],
+    ['`RXPIP_NO_UPDATE_CHECK`', 'client', 'Any value skips the daily look for a newer client'],
+    ['`RXPIP_CLIENT_DIR`', 'client', 'Folder with the client files, set by the launchers; `rxpip update` writes there'],
     ['`RXPIP_CLOSED`', 'server', '`1` makes the whole repository private: every read needs a token'],
     ['`RXPIP_PUBLIC_URL`', 'server', 'Full address of the CGI program, used in mailed links'],
     ['`RXPIP_MAIL_FROM`', 'server', 'Sender address of the mails (default rxpip@<server name>)'],
@@ -714,7 +775,10 @@ module.exports = function (D) {
     ['`PACKAGE.META`', 'repo/<name>/<version>/', 'Name, version, author, summary, requirements'],
     ['`ARTIFACTS.META`', 'repo/<name>/<version>/', 'Kind, platform and files of each artifact'],
     ['`<KIND>-<PLATFORM>.rxpkg`', 'repo/<name>/<version>/artifacts/', 'The stored archive'],
-    ['`.auth/`', 'repo/', 'Users, token hashes, invitations, owner lists, pending sign-up requests (`requests/`)'],
+    ['`.auth/`', 'repo/', 'Users, token hashes, invitations, owner lists, visibility, readers, administrators (`admins`), pending sign-up requests (`requests/`)'],
+    ['`.stats/`', 'repo/', 'Daily usage logs and the salt for the client ids (administrators only)'],
+    ['`.clients/<kind>/<version>/`', 'repo/', 'Published client releases, with a `MANIFEST` and a `LATEST` pointer per kind'],
+    ['`clientcheck.txt`', 'client home', 'Date and result of the last look for a newer client'],
   ], [3000, 3000, 3638], 'Files used by RXPIP');
 
   D.chapter('Contents of the Kit', { appendix: 'D' });

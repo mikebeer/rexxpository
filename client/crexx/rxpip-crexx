@@ -3,6 +3,7 @@
 # on the PATH, or CREXX_HOME pointing at the install directory (with bin/).
 # The client is compiled on first use (and again when rxpip.crexx changes).
 D=$(cd "$(dirname "$0")" && pwd)
+export RXPIP_CLIENT_DIR=$D
 [ -n "$CREXX_HOME" ] && PATH="$CREXX_HOME/bin:$PATH"
 command -v rxc >/dev/null 2>&1 || { echo "rxpip-crexx: rxc not found (put cREXX on PATH or set CREXX_HOME)" >&2; exit 1; }
 HOME_DIR=${RXPIP_HOME:-$HOME/.rxpip}

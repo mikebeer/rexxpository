@@ -84,6 +84,7 @@ call EnsureDir home || '/lib'
 call EnsureDir home || '/cache'
 call LoadOrInitConfig home
 cfg.READTOKEN = ResolveToken(home, cfg.REPO_URL, '')   /* sent with every read, for private packages */
+call SetClientHeader
 
 parse var allargs cmd '01'x rest
 cmd = translate(cmd)
@@ -95,7 +96,11 @@ cmd = translate(cmd)
 if wordpos(cmd, 'INSTALL UNINSTALL LIST FREEZE SCAN') > 0 then rest = ParseScope(rest)
 else call SetScope 'GLOBAL'
 
+if wordpos(cmd, 'INSTALL SEARCH SHOW RUN') > 0 then call CheckClientUpdate home
+
 select
+  when cmd = 'UPDATE'    then call CmdUpdate rest
+  when cmd = 'ADMIN'     then call CmdAdmin rest
   when cmd = 'INSTALL'   then call CmdInstall rest
   when cmd = 'UNINSTALL' then call CmdUninstall rest
   when cmd = 'LIST'      then call CmdList
@@ -160,7 +165,10 @@ CmdHelp:
   say '  owner list|add|remove <pkg> [user]   manage who may publish a package'
   say '  visibility <pkg> [public|private]   show / set whether a package is public (owners)'
   say '  reader list|add|remove <pkg> [user]   who may read a private package besides its owners'
-  say '  config get|set <key> [val]  view/change REPO_URL, LIB_DIR, INTERPRETER'
+  say '  update [--check]            check for a newer rxpip and install it (this client: ' || ClientVersion() || ')'
+  say '  admin stats [--days=N] | users | lock <user> | client-publish <kind> --version=V <files>'
+  say '                              administrator commands (need an administrator token)'
+  say '  config get|set <key> [val]  view/change REPO_URL, LIB_DIR, INTERPRETER, AUTOUPDATE, CLIENT_CHECK'
   say '  path                        show the library directory and how to put it on PATH'
   say '  help                        this message'
   return
@@ -1287,6 +1295,242 @@ RecordInstalled: procedure
   return
 
 /* =======================================================================
+   CLIENT VERSION, SELF-UPDATE and ADMINISTRATION
+   -----------------------------------------------------------------------
+   Every request carries X-Rxpip-Client: <kind>/<version> (<os>), which is
+   all the server learns about this machine (see the privacy notes in the
+   manual). `rxpip update` fetches the newest release of THIS client kind
+   from the server and replaces the client files; a once-a-day check
+   prints a hint on stderr when a newer release exists (config
+   CLIENT_CHECK: off to disable, AUTOUPDATE: 1 to install it silently).
+   ======================================================================= */
+
+ClientVersion: procedure
+  return '1.2.0'
+
+ClientKind: procedure
+  if IsOoRexx() then return 'oorexx'
+  return 'regina'
+
+SetClientHeader: procedure expose cfg.
+  parse value PlatformTag() with . '-' os '-' .
+  if os = '' then os = 'unknown'
+  call value 'RXPIP_CLIENT_HDR', 'X-Rxpip-Client: ' || ClientKind() || '/' || ClientVersion() || ' (' || translate(os, 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') || ')', 'ENVIRONMENT'
+  return
+
+ClientHdrArg: procedure
+  h = value('RXPIP_CLIENT_HDR',,'ENVIRONMENT')
+  if h = '' then return ''
+  return '-H "' || h || '"'
+
+/* directory that holds this client's files */
+ClientDir: procedure
+  d = value('RXPIP_CLIENT_DIR',,'ENVIRONMENT')
+  if d \= '' then return translate(d, '/', '\')
+  parse source . . src
+  return Dirname(translate(src, '/', '\'))
+
+/* the update channel is only trusted over https (or a local test server) */
+UpdateChannelOk: procedure
+  parse arg repo
+  if left(repo, 8) = 'https://' then return 1
+  if left(repo, 17) = 'http://127.0.0.1:' | left(repo, 17) = 'http://localhost:' then return 1
+  return 0
+
+/* rxpip update [--check] */
+CmdUpdate: procedure expose home cfg.
+  parse arg args
+  rc = DoUpdate(HasFlag(args, '--check'), 0)
+  exit rc
+  return
+
+/* check (and unless checkonly, install) the newest release. quiet: no
+   chatter when already current. Returns 0 ok, 1 failure. */
+DoUpdate: procedure expose home cfg.
+  parse arg checkonly, quiet
+  repo = cfg.REPO_URL
+  kind = ClientKind()
+  cur = ClientVersion()
+  m = ServerGet(repo, 'CLIENT', 'kind=' || kind)
+  if StanzaField(m, 'STATUS') \= 'OK' then do
+    if \quiet then say 'rxpip: no client release is published for' kind
+    return 1
+  end
+  latest = StanzaField(m, 'VERSION')
+  files = StanzaField(m, 'FILES')
+  if CompareVersions(latest, cur) <= 0 then do
+    if \quiet then say 'rxpip' cur '(' || kind || ') is up to date'
+    return 0
+  end
+  if checkonly then do
+    say 'rxpip' latest 'is available (you have' cur || '). Run: rxpip update'
+    return 0
+  end
+  if \UpdateChannelOk(repo) then do
+    say 'rxpip: refusing to update over an unencrypted connection (' || repo || ')'
+    return 1
+  end
+  dir = ClientDir()
+  say 'rxpip: updating' cur '->' latest 'in' dir
+  do i = 1 to words(files)
+    f = word(files, i)
+    nf = dir || '/' || f || '.new'
+    call DelFile nf
+    'curl -s -f ' || ClientHdrArg() || ' -o "' || nf || '" "' || repo || '?action=CLIENT&kind=' || kind || '&version=' || latest || '&file=' || UrlEncode(f) || '"'
+    ok = 0
+    if FileExists(nf) then if stream(nf, 'c', 'query size') > 0 then ok = 1
+    if \ok then do
+      say 'rxpip: could not download or write' f 'in' dir '(permissions? try again as the owner of that directory)'
+      do j = 1 to i
+        call DelFile dir || '/' || word(files, j) || '.new'
+      end
+      return 1
+    end
+  end
+  do i = 1 to words(files)
+    f = word(files, i)
+    call MoveFile dir || '/' || f || '.new', dir || '/' || f
+  end
+  call StampCheck home, latest, ''
+  say 'rxpip: updated to' latest
+  return 0
+
+StampCheck: procedure
+  parse arg home, latest, minv
+  f = home || '/clientcheck.txt'
+  call DelFile f
+  call charout f, 'DATE: ' || date('S') || '0a'x || 'LATEST: ' || latest || '0a'x || 'MIN: ' || minv || '0a'x
+  call stream f, 'c', 'close'
+  return
+
+/* once a day: look for a newer release and say so on stderr */
+CheckClientUpdate: procedure expose home cfg.
+  parse arg home
+  if translate(GetConfigValue(home, 'CLIENT_CHECK')) = 'OFF' then return
+  if value('RXPIP_NO_UPDATE_CHECK',,'ENVIRONMENT') \= '' then return
+  f = home || '/clientcheck.txt'
+  latest = ''; minv = ''
+  if FileExists(f) & FileField(f, 'DATE') = date('S') then do
+    latest = FileField(f, 'LATEST'); minv = FileField(f, 'MIN')
+  end
+  else do
+    m = ServerGet(cfg.REPO_URL, 'CLIENT', 'kind=' || ClientKind())
+    if StanzaField(m, 'STATUS') = 'OK' then do
+      latest = StanzaField(m, 'LATEST'); minv = StanzaField(m, 'MIN')
+    end
+    call StampCheck home, latest, minv
+  end
+  cur = ClientVersion()
+  if latest = '' | CompareVersions(latest, cur) <= 0 then return
+  if GetConfigValue(home, 'AUTOUPDATE') = '1' then do
+    if DoUpdate(0, 1) = 0 then do
+      call ErrSay 'rxpip: updated to' latest '(run the command again to use it)'
+      exit 0
+    end
+    return
+  end
+  if minv \= '' & CompareVersions(cur, minv) < 0 then call ErrSay 'rxpip: this client (' || cur || ') is too old for the server (needs' minv || '). Run: rxpip update'
+  else call ErrSay 'rxpip: version' latest 'is available (you have' cur || '). Run: rxpip update'
+  return
+
+/* a line on standard error (Regina names the stream <stderr>, ooRexx STDERR) */
+ErrSay: procedure
+  parse arg m
+  if IsOoRexx() then call lineout 'STDERR', m
+  else call lineout '<stderr>', m
+  return
+
+/* a value of key in a "KEY: value" file */
+FileField: procedure
+  parse arg file, key
+  res = ''
+  if \FileExists(file) then return ''
+  do while lines(file) > 0
+    l = linein(file)
+    parse var l k ':' v
+    if translate(strip(k)) = translate(key) then do
+      res = strip(v)
+      leave
+    end
+  end
+  call stream file, 'c', 'close'
+  return res
+
+/* rxpip admin stats [--days=N] | users | lock <user> |
+              client-publish <kind> --version=V [--min=V] <file>... */
+CmdAdmin: procedure expose home cfg.
+  parse arg sub '01'x rest
+  sub = translate(sub)
+  repo = cfg.REPO_URL
+  t = ResolveToken(home, repo, rest)
+  if sub = '' | wordpos(sub, 'STATS USERS LOCK CLIENT-PUBLISH') = 0 then do
+    say 'usage: rxpip admin stats [--days=N] | users | lock <user> | client-publish <kind> --version=V [--min=V] <file>...'
+    exit 1
+    return
+  end
+  if t = '' then do
+    say 'not logged in (rxpip login --token=T)'
+    exit 1
+    return
+  end
+  sec = 'X-Rxpip-Token: ' || t
+  select
+    when sub = 'STATS' then do
+      days = OptValue(rest, 'days')
+      hdr = ''
+      if days \= '' then hdr = 'X-Rxpip-Days: ' || days
+      out = ServerPost(repo, 'ADMINSTATS', '', hdr, sec, '')
+    end
+    when sub = 'USERS' then out = ServerPost(repo, 'ADMINUSERS', '', '', sec, '')
+    when sub = 'LOCK' then do
+      parse var rest user '01'x .
+      if user = '' | left(user, 2) = '--' then do
+        say 'usage: rxpip admin lock <user>'
+        exit 1
+        return
+      end
+      out = ServerPost(repo, 'ADMINLOCK', '', 'X-Rxpip-User: ' || user, sec, '')
+    end
+    otherwise do                       /* CLIENT-PUBLISH */
+      parse var rest kind '01'x more
+      ver = OptValue(more, 'version')
+      minv = OptValue(more, 'min')
+      dir = ''; names = ''
+      do while more \= ''
+        parse var more w '01'x more
+        if w = '' | left(w, 2) = '--' then iterate
+        if \FileExists(w) then do
+          say 'rxpip: no such file:' w
+          exit 1
+          return
+        end
+        w = translate(w, '/', '\')
+        if dir \= '' & Dirname(w) \= dir then do
+          say 'rxpip: all release files must be in one directory'
+          exit 1
+          return
+        end
+        dir = Dirname(w)
+        names = names Basename(w)
+      end
+      if kind = '' | left(kind, 2) = '--' | ver = '' | names = '' then do
+        say 'usage: rxpip admin client-publish <kind> --version=V [--min=V] <file>...'
+        exit 1
+        return
+      end
+      tgz = TempDir() || '/rxpip_rel_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tgz'
+      'tar czf "' || tgz || '" -C "' || dir || '" ' || names
+      hdr = 'X-Rxpip-Kind: ' || kind || '01'x || 'X-Rxpip-Version: ' || ver
+      if minv \= '' then hdr = hdr || '01'x || 'X-Rxpip-Min: ' || minv
+      out = ServerPost(repo, 'ADMINCLIENT', '', hdr, sec, tgz)
+      call DelFile tgz
+    end
+  end
+  rc = ShowResponse(out)
+  exit rc
+  return
+
+/* =======================================================================
    HTTP TRANSPORT  (shells out to curl; text responses read back in full)
    ======================================================================= */
 
@@ -1297,9 +1541,9 @@ ServerGet: procedure expose cfg.
   if extra \= '' then url = url || '&' || extra
   tmp = TempDir() || '/rxpip_resp_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
   hf = ReadHeaderFile()
-  if hf = '' then 'curl -s -o "' || tmp || '" "' || url || '"'
+  if hf = '' then 'curl -s --connect-timeout 15 ' || ClientHdrArg() || ' -o "' || tmp || '" "' || url || '"'
   else do
-    'curl -s -o "' || tmp || '" -H @"' || hf || '" "' || url || '"'
+    'curl -s --connect-timeout 15 ' || ClientHdrArg() || ' -o "' || tmp || '" -H @"' || hf || '" "' || url || '"'
     call DelFile hf
   end
   out = ''
@@ -1340,9 +1584,9 @@ ServerDownload: procedure expose cfg.
   if ver \= '' then url = url || '&version=' || UrlEncode(ver)
   url = url || '&kind=' || UrlEncode(kind) || '&platform=' || UrlEncode(platform)
   hf = ReadHeaderFile()
-  if hf = '' then 'curl -s -f -o "' || outfile || '" "' || url || '"'
+  if hf = '' then 'curl -s -f ' || ClientHdrArg() || ' -o "' || outfile || '" "' || url || '"'
   else do
-    'curl -s -f -o "' || outfile || '" -H @"' || hf || '" "' || url || '"'
+    'curl -s -f ' || ClientHdrArg() || ' -o "' || outfile || '" -H @"' || hf || '" "' || url || '"'
     call DelFile hf
   end
   if \FileExists(outfile) then return 1
@@ -1363,7 +1607,7 @@ ServerPost: procedure
   uniq = translate(time('L'), '__', ':.') || '_' || random(1,99999)
   hdrfile = MakeSecretFile(secrets)
   tmp = TempDir() || '/rxpip_post_' || uniq || '.tmp'
-  cmd = 'curl -s -o "' || tmp || '" -X POST -H @"' || hdrfile || '"'
+  cmd = 'curl -s ' || ClientHdrArg() || ' -o "' || tmp || '" -X POST -H @"' || hdrfile || '"'
   do while hdrs \= ''
     parse var hdrs h '01'x hdrs
     if h \= '' then cmd = cmd || ' -H "' || h || '"'

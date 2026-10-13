@@ -123,6 +123,22 @@ The first publish of a package name makes you its owner; owners can add
 other owners. Releases are immutable. Details and the operator commands
 are in [DEPLOY.md](DEPLOY.md) §8.
 
+## Client updates, statistics and administrators
+
+Clients send a short `X-Rxpip-Client: regina/1.2.0 (linux)` note with every
+request. `rxpip update [--check]` fetches the newest release of your kind of
+client from the server and replaces the client files (HTTPS only); once a day
+`install`/`search`/`show`/`run` print a hint when a newer release exists
+(`CLIENT_CHECK off` disables it, `AUTOUPDATE 1` installs it automatically).
+
+The server keeps a daily usage log (`repo/.stats/`): time, action, client
+kind/version/OS, a per-day pseudonymous id (no addresses, no tokens), and
+which packages are downloaded. It is **not public**: only administrators
+(`admin addadmin <user>` on the server) can read it, with `rxpip admin stats
+[--days=N]`; they can also `rxpip admin users`, `lock <user>` and publish
+client releases with `rxpip admin client-publish <kind> --version=V <files>`.
+`RXPIP_NOSTATS=1` turns the recording off. See DEPLOY.md and the manual.
+
 ## Tests
 
 `tests/run_tests.sh` starts a CGI harness (behaves like Apache) and runs

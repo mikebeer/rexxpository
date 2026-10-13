@@ -3,6 +3,7 @@
 # Set NETREXX_JAR if the jar is not next to this script. The client is
 # compiled on first use (and again when Rxpip.nrx changes).
 D=$(cd "$(dirname "$0")" && pwd)
+export RXPIP_CLIENT_DIR=$D
 JAR=${NETREXX_JAR:-$D/NetRexxC.jar}
 [ -f "$JAR" ] || { echo "rxpip-netrexx: NetRexxC.jar not found (set NETREXX_JAR)" >&2; exit 1; }
 OUT=${RXPIP_HOME:-$HOME/.rxpip}/netrexx/bin

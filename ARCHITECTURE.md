@@ -470,6 +470,35 @@ readable even briefly. A public package may not require a private one. The
 clients read the token once at start (`--token`, `RXPIP_TOKEN`, saved login)
 and pass it to curl through the same private header file as for publishing.
 
+### Client versions, statistics and the administrator role
+
+Clients send `X-Rxpip-Client: <kind>/<version> (<os>)` (a request header; the
+server only logs it). The server writes `repo/.stats/<yyyymmdd>.log`:
+`time|REQ|action|kind|version|os|uid` for each request except PING and the web
+pages, plus `DL`/`PUB` lines with package, version and artifact. `uid` is
+`left(sha256(REMOTE_ADDR|day|salt),12)`, with a random salt in `.stats/salt`,
+so ids do not link across days and hold no address. Pruning (400 days) runs when
+a new day's file is created. `RXPIP_NOSTATS=1` disables logging.
+
+Client releases: `repo/.clients/<kind>/<ver>/{files,MANIFEST}` and
+`<kind>/LATEST` (only moves forward). `CLIENT` (public GET, works in closed mode)
+returns the manifest (`VERSION LATEST MIN FILES`) or one file named in the
+manifest. `ADMINCLIENT` (POST, admin) takes a tar.gz validated by
+`ValidateArchive` (flat safe names) and refuses an existing version.
+
+The administrator role is a list in `.auth/admins`; `AuthenticateAdmin` = normal
+token auth + membership (403 otherwise). Admin HTTP actions: `ADMINSTATS`,
+`ADMINUSERS`, `ADMINLOCK`, `ADMINCLIENT`. Local CLI: `addadmin`, `rmadmin`,
+`admins`, `stats`.
+
+Client side: `update [--check]` downloads each file as `<name>.new` and moves
+them over the old ones only when all arrived (refused over plain http except
+127.0.0.1/localhost); NetRexx/cREXX also delete their compiled output so the
+launcher recompiles. The client finds its own folder from `RXPIP_CLIENT_DIR`
+(set by the launchers; Regina falls back to `parse source`). A once-a-day check
+(stamp `clientcheck.txt`) prints a hint on stderr (cREXX: stdout, not before
+`run`).
+
 ### VM/370plus
 
 *Existing route.* mikebeer/vm370plus (`arch/31bit/linux390/rxpip`) already

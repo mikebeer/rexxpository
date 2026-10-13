@@ -9,4 +9,4 @@ for a in "$@"; do
   e=$(printf '%s' "$a" | sed 's/\\/\\\\/g; s/"/\\"/g')
   q="$q \"$e\""
 done
-RXPIP_QUOTED=1 RXPIP_INTERPRETER=${RXPIP_INTERPRETER:-rexx} exec rexx "$D/rxpip.rexx" "$q"
+RXPIP_CLIENT_DIR=$D RXPIP_QUOTED=1 RXPIP_INTERPRETER=${RXPIP_INTERPRETER:-rexx} exec rexx "$D/rxpip.rexx" "$q"

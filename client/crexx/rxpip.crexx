@@ -17,7 +17,7 @@
    * Needs rxc, rxas and rxvm on the PATH (or CREXX_HOME/bin) for run/build.
    --------------------------------------------------------------------- */
 options levelb
-namespace rxpip expose home lang repoUrl NL SOH lastrc upgrade tgtDir recDir isGlobal forceOw readToken
+namespace rxpip expose home lang repoUrl NL SOH lastrc upgrade tgtDir recDir isGlobal forceOw readToken clientHdr
 import rxfnsb
 
 main: procedure = .int
@@ -29,6 +29,7 @@ main: procedure = .int
   upgrade = 0
   forceOw = 0
   readToken = ''
+  clientHdr = ''
   isGlobal = 0
   tgtDir = ''
   recDir = ''
@@ -44,6 +45,7 @@ main: procedure = .int
   call loadConfig
   emptyArgs = .string[]
   readToken = resolveToken(emptyArgs)     /* sent with every read, for private packages */
+  call setClientHeader
   if a.0 < 1 then do
     call cmdHelp
     return 0
@@ -53,11 +55,15 @@ main: procedure = .int
   do i = 2 to a.0
     rest[i - 1] = a[i]
   end
+  /* the update hint goes to stdout here (no stderr), so not before 'run' */
+  if wordpos(cmd, 'INSTALL SEARCH SHOW') > 0 then call checkClientUpdate
   /* install scope: the current directory by default for the commands that
      manage installed packages; run/build use the shared store */
   if wordpos(cmd, 'INSTALL UNINSTALL LIST FREEZE SCAN') > 0 then rest = parseScope(rest)
   else call setScope('GLOBAL', '')
   select
+    when cmd = 'UPDATE'    then return cmdUpdate(rest)
+    when cmd = 'ADMIN'     then return cmdAdmin(rest)
     when cmd = 'INSTALL'   then call cmdInstall(rest)
     when cmd = 'UNINSTALL' then call cmdUninstall(rest)
     when cmd = 'LIST'      then call cmdList
@@ -110,6 +116,9 @@ cmdHelp: procedure = .void
   say '  owner list|add|remove <pkg> [user]   manage who may publish a package'
   say '  visibility <pkg> [public|private]   show / set whether a package is public (owners)'
   say '  reader list|add|remove <pkg> [user]   who may read a private package besides its owners'
+  say '  update [--check]            check for a newer rxpip and install it (this client: ' || clientVersion() || ')'
+  say '  admin stats [--days=N] | users | lock <user> | client-publish <kind> --version=V <files>'
+  say '                              administrator commands (need an administrator token)'
   say '  config get|set <key> [val]  view/change REPO_URL, LIB_DIR, INTERPRETER'
   say '  help                        this message'
   say ''
@@ -1015,6 +1024,245 @@ tokenLooksValid: procedure = .int
   return 0
 
 /* =====================================================================
+   CLIENT VERSION, SELF-UPDATE and ADMINISTRATION
+   Every request carries X-Rxpip-Client: crexx/<version> (<os>) -- all the
+   server learns about this machine. `rxpip update` replaces rxpip.crexx;
+   the launcher recompiles it on the next start.
+   ===================================================================== */
+clientVersion: procedure = .string
+  return '1.2.0'
+
+setClientHeader: procedure = .void
+  os = 'unknown'
+  out = .string[]
+  address crexx "platform" output out
+  if out.0 > 0 then do
+    l = out[1]
+    if left(l, 3) = 'os=' then os = translate(substr(l, 4), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+  end
+  clientHdr = 'X-Rxpip-Client: crexx/' || clientVersion() || ' (' || os || ')'
+  return
+
+clientDir: procedure = .string
+  d = getenv('RXPIP_CLIENT_DIR')
+  if d = '' then d = '.'
+  return translate(d, '/', '5C'x)
+
+updateChannelOk: procedure = .int
+  if left(repoUrl, 8) = 'https://' then return 1
+  if left(repoUrl, 17) = 'http://127.0.0.1:' | left(repoUrl, 17) = 'http://localhost:' then return 1
+  return 0
+
+cmdUpdate: procedure = .int
+  arg a = .string[]
+  chk = 0
+  do i = 1 to a.0
+    if a[i] = '--check' then chk = 1
+  end
+  return doUpdate(chk, 0)
+
+doUpdate: procedure = .int
+  arg checkonly = .int, quiet = .int
+  kind = 'crexx'
+  cur = clientVersion()
+  m = serverGet('CLIENT', 'kind=' || kind)
+  if stanzaField(m, 'STATUS') \= 'OK' then do
+    if quiet = 0 then say 'rxpip: no client release is published for ' || kind
+    return 1
+  end
+  latest = stanzaField(m, 'VERSION')
+  flist = stanzaField(m, 'FILES')
+  if compareVersions(latest, cur) <= 0 then do
+    if quiet = 0 then say 'rxpip ' || cur || ' (' || kind || ') is up to date'
+    return 0
+  end
+  if checkonly = 1 then do
+    say 'rxpip ' || latest || ' is available (you have ' || cur || '). Run: rxpip update'
+    return 0
+  end
+  if updateChannelOk() = 0 then do
+    say 'rxpip: refusing to update over an unencrypted connection (' || repoUrl || ')'
+    return 1
+  end
+  dir = clientDir()
+  say 'rxpip: updating ' || cur || ' -> ' || latest || ' in ' || dir
+  do i = 1 to words(flist)
+    f = word(flist, i)
+    nf = dir || '/' || f || '.new'
+    call rmfile(nf)
+    argv = .string[]
+    argv[1] = 'curl'
+    argv[2] = '-s'
+    argv[3] = '-f'
+    argv[4] = '-H'
+    argv[5] = clientHdr
+    argv[6] = '-o'
+    argv[7] = nf
+    argv[8] = repoUrl || '?action=CLIENT&kind=' || kind || '&version=' || latest || '&file=' || urlEnc(f)
+    x = exec(argv)
+    good = 0
+    if fileExists(nf) = 1 then good = 1
+    if good = 0 then do
+      say 'rxpip: could not download or write ' || f || ' in ' || dir || ' (permissions? try again as the owner of that directory)'
+      do j = 1 to i
+        call rmfile(dir || '/' || word(flist, j) || '.new')
+      end
+      return 1
+    end
+  end
+  ao = .string[]
+  ae = .string[]
+  do i = 1 to words(flist)
+    f = word(flist, i)
+    nf = dir || '/' || f || '.new'
+    tf = dir || '/' || f
+    address crexx "mv :nf :tf" output ao error ae
+  end
+  call rmfile(home || '/crexx/bin/rxpip.rxbin')   /* the launcher recompiles the new source */
+  call stampCheck(latest, '')
+  say 'rxpip: updated to ' || latest
+  return 0
+
+readAll: procedure = .string
+  arg f = .string
+  res = ''
+  rl = readlines(f)
+  do i = 1 to rl.0
+    res = res || rl[i] || NL
+  end
+  return res
+
+stampCheck: procedure = .void
+  arg latest = .string, minv = .string
+  call writeText(home || '/clientcheck.txt', 'DATE: ' || date('STANDARD') || NL || 'LATEST: ' || latest || NL || 'MIN: ' || minv || NL)
+  return
+
+checkClientUpdate: procedure = .void
+  if upper(getConfig('CLIENT_CHECK')) = 'OFF' then return
+  if getenv('RXPIP_NO_UPDATE_CHECK') \= '' then return
+  today = date('STANDARD')
+  f = home || '/clientcheck.txt'
+  latest = ''
+  minv = ''
+  if fileExists(f) = 1 then do
+    txt = readAll(f)
+    if stanzaField(txt, 'DATE') = today then do
+      latest = stanzaField(txt, 'LATEST')
+      minv = stanzaField(txt, 'MIN')
+    end
+  end
+  if latest = '' then do
+    m = serverGet('CLIENT', 'kind=crexx')
+    if stanzaField(m, 'STATUS') = 'OK' then do
+      latest = stanzaField(m, 'LATEST')
+      minv = stanzaField(m, 'MIN')
+    end
+    call stampCheck(latest, minv)
+  end
+  cur = clientVersion()
+  if latest = '' then return
+  if compareVersions(latest, cur) <= 0 then return
+  if getConfig('AUTOUPDATE') = '1' then do
+    r = doUpdate(0, 1)
+    if r = 0 then do
+      say 'rxpip: updated to ' || latest || ' (run the command again to use it)'
+      exit 0
+    end
+    return
+  end
+  if minv \= '' & compareVersions(cur, minv) < 0 then do
+    say 'rxpip: this client (' || cur || ') is too old for the server (needs ' || minv || '). Run: rxpip update'
+    return
+  end
+  say 'rxpip: version ' || latest || ' is available (you have ' || cur || '). Run: rxpip update'
+  return
+
+/* rxpip admin stats [--days=N] | users | lock <user> |
+              client-publish <kind> --version=V [--min=V] <file>... */
+cmdAdmin: procedure = .int
+  arg a = .string[]
+  sub = ''
+  if a.0 > 0 then sub = upper(a[1])
+  t = resolveToken(a)
+  if sub = '' | wordpos(sub, 'STATS USERS LOCK CLIENT-PUBLISH') = 0 then do
+    say 'usage: rxpip admin stats [--days=N] | users | lock <user> | client-publish <kind> --version=V [--min=V] <file>...'
+    return 1
+  end
+  if t = '' then do
+    say 'not logged in (rxpip login --token=T)'
+    return 1
+  end
+  sec = .string[]
+  sec[1] = 'X-Rxpip-Token: ' || t
+  hdrs = .string[]
+  out = ''
+  if sub = 'STATS' then do
+    days = opt(a, 'days')
+    if days \= '' then hdrs[1] = 'X-Rxpip-Days: ' || days
+    out = serverPost('ADMINSTATS', '', hdrs, sec, '')
+  end
+  else if sub = 'USERS' then out = serverPost('ADMINUSERS', '', hdrs, sec, '')
+  else if sub = 'LOCK' then do
+    u = ''
+    if a.0 > 1 then u = a[2]
+    if u = '' | left(u, 2) = '--' then do
+      say 'usage: rxpip admin lock <user>'
+      return 1
+    end
+    hdrs[1] = 'X-Rxpip-User: ' || u
+    out = serverPost('ADMINLOCK', '', hdrs, sec, '')
+  end
+  else do
+    kind = ''
+    if a.0 > 1 then kind = a[2]
+    ver = opt(a, 'version')
+    minv = opt(a, 'min')
+    dir = ''
+    tarv = .string[]
+    n = 0
+    n = n + 1; tarv[n] = 'tar'
+    n = n + 1; tarv[n] = 'czf'
+    tgz = home || '/rel_' || pid() || '.tgz'
+    n = n + 1; tarv[n] = tgz
+    n = n + 1; tarv[n] = '-C'
+    n = n + 1; tarv[n] = '.'
+    ndirpos = n
+    nfiles = 0
+    do i = 3 to a.0
+      w = a[i]
+      if left(w, 2) = '--' then iterate
+      if fileExists(w) = 0 then do
+        say 'rxpip: no such file: ' || w
+        return 1
+      end
+      w = translate(w, '/', '5C'x)
+      q = lastpos('/', w)
+      d = '.'
+      if q > 1 then d = substr(w, 1, q - 1)
+      if q = 1 then d = '/'
+      if nfiles > 0 & d \= dir then do
+        say 'rxpip: all release files must be in one directory'
+        return 1
+      end
+      dir = d
+      nfiles = nfiles + 1
+      n = n + 1; tarv[n] = baseName(w)
+    end
+    if kind = '' | left(kind, 2) = '--' | ver = '' | nfiles = 0 then do
+      say 'usage: rxpip admin client-publish <kind> --version=V [--min=V] <file>...'
+      return 1
+    end
+    tarv[ndirpos] = dir
+    x = exec(tarv)
+    hdrs[1] = 'X-Rxpip-Kind: ' || kind
+    hdrs[2] = 'X-Rxpip-Version: ' || ver
+    if minv \= '' then hdrs[3] = 'X-Rxpip-Min: ' || minv
+    out = serverPost('ADMINCLIENT', '', hdrs, sec, tgz)
+    call rmfile(tgz)
+  end
+  return showResponse(out)
+
+/* =====================================================================
    HTTP (curl)
    ===================================================================== */
 serverGet: procedure = .string
@@ -1024,13 +1272,15 @@ serverGet: procedure = .string
   argv = .string[]
   argv[1] = 'curl'
   argv[2] = '-s'
-  argv[3] = url
+  argv[3] = '-H'
+  argv[4] = clientHdr
+  argv[5] = url
   if readToken \= '' then do
     hf = home || '/rhdr_' || pid() || '.tmp'
     call writePrivate(hf, 'X-Rxpip-Token: ' || readToken || NL || NL)
-    argv[3] = '-H'
-    argv[4] = '@' || hf
-    argv[5] = url
+    argv[5] = '-H'
+    argv[6] = '@' || hf
+    argv[7] = url
     res = exec(argv)
     call rmfile(hf)
     return res
@@ -1048,13 +1298,15 @@ serverDownload: procedure = .int
   argv[3] = '-f'
   argv[4] = '-o'
   argv[5] = outfile
-  argv[6] = url
+  argv[6] = '-H'
+  argv[7] = clientHdr
+  argv[8] = url
   if readToken \= '' then do
     hf = home || '/rhdr_' || pid() || '.tmp'
     call writePrivate(hf, 'X-Rxpip-Token: ' || readToken || NL || NL)
-    argv[6] = '-H'
-    argv[7] = '@' || hf
-    argv[8] = url
+    argv[8] = '-H'
+    argv[9] = '@' || hf
+    argv[10] = url
     tmp = exec(argv)
     call rmfile(hf)
     return lastrc
@@ -1082,6 +1334,8 @@ serverPost: procedure = .string
   n = n + 1; argv[n] = '-s'
   n = n + 1; argv[n] = '-X'
   n = n + 1; argv[n] = 'POST'
+  n = n + 1; argv[n] = '-H'
+  n = n + 1; argv[n] = clientHdr
   n = n + 1; argv[n] = '-H'
   n = n + 1; argv[n] = '@' || hf
   do i = 1 to hdrs.0

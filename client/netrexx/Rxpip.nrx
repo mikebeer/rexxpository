@@ -67,12 +67,15 @@ class Rxpip
     loop i = 1 to args.length - 1
       rest[i - 1] = args[i]
     end
+    if ' INSTALL SEARCH SHOW RUN '.pos(' 'cmd' ') > 0 then checkClientUpdate
     -- install scope: the current directory by default for the commands that
     -- manage installed packages; run/build use the shared store
     if ' INSTALL UNINSTALL LIST FREEZE SCAN '.pos(' 'cmd' ') > 0 then rest = parseScope(rest)
     else setScope('GLOBAL', '')
     do
       select
+        when cmd = 'UPDATE'    then cmdUpdate(rest)
+        when cmd = 'ADMIN'     then cmdAdmin(rest)
         when cmd = 'INSTALL'   then cmdInstall(rest)
         when cmd = 'UNINSTALL' then cmdUninstall(rest)
         when cmd = 'LIST'      then cmdList
@@ -129,7 +132,10 @@ class Rxpip
     say '  owner list|add|remove <pkg> [user]   manage who may publish a package'
     say '  visibility <pkg> [public|private]   show / set whether a package is public (owners)'
     say '  reader list|add|remove <pkg> [user]   who may read a private package besides its owners'
-    say '  config get|set <key> [val]  view/change REPO_URL, LIB_DIR, INTERPRETER'
+    say '  update [--check]            check for a newer rxpip and install it (this client: 'clientVersion')'
+    say '  admin stats [--days=N] | users | lock <user> | client-publish <kind> --version=V <files>'
+    say '                              administrator commands (need an administrator token)'
+    say '  config get|set <key> [val]  view/change REPO_URL, LIB_DIR, INTERPRETER, AUTOUPDATE, CLIENT_CHECK'
     say '  help                        this message'
     say ''
     say 'Scope options (install, uninstall, list, freeze, scan):'
@@ -875,14 +881,210 @@ class Rxpip
     return t.verify('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~-') = 0
 
   /* =====================================================================
+     CLIENT VERSION, SELF-UPDATE and ADMINISTRATION
+     Every request carries X-Rxpip-Client: netrexx/<version> (<os>) -- all
+     the server learns about this machine. `rxpip update` replaces the
+     client source; the launcher recompiles it on the next start.
+     ===================================================================== */
+  method clientVersion static returns Rexx
+    return '1.2.0'
+
+  method clientHeader static returns Rexx
+    os = Rexx(System.getProperty('os.name')).lower.word(1)
+    return Rexx 'X-Rxpip-Client: netrexx/'clientVersion' ('os')'
+
+  method clientDir static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    d = env('RXPIP_CLIENT_DIR')
+    if d = '' then d = '.'
+    return d.translate('/', Rexx('5C').x2c())
+
+  method updateChannelOk static returns boolean
+    if repoUrl.left(8) = 'https://' then return 1
+    if repoUrl.left(17) = 'http://127.0.0.1:' | repoUrl.left(17) = 'http://localhost:' then return 1
+    return 0
+
+  method errSay(m=Rexx) static
+    System.err.println(m.toString)
+
+  method cmdUpdate(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    chk = 0
+    loop i = 0 to a.length - 1
+      if a[i] = '--check' then chk = 1
+    end
+    exit doUpdate(chk, 0)
+
+  method doUpdate(checkonly=int, quiet=int) static returns int signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    kind = 'netrexx'
+    cur = clientVersion
+    m = serverGet('CLIENT', 'kind='kind)
+    if stanzaField(m, 'STATUS') \= 'OK' then do
+      if \quiet then say 'rxpip: no client release is published for 'kind
+      return 1
+    end
+    latest = stanzaField(m, 'VERSION')
+    flist = stanzaField(m, 'FILES')
+    if compareVersions(latest, cur) <= 0 then do
+      if \quiet then say 'rxpip 'cur' ('kind') is up to date'
+      return 0
+    end
+    if checkonly then do
+      say 'rxpip 'latest' is available (you have 'cur'). Run: rxpip update'
+      return 0
+    end
+    if \updateChannelOk then do
+      say 'rxpip: refusing to update over an unencrypted connection ('repoUrl')'
+      return 1
+    end
+    dir = clientDir
+    say 'rxpip: updating 'cur' -> 'latest' in 'dir
+    loop i = 1 to flist.words
+      f = flist.word(i)
+      nf = dir'/'f'.new'
+      deletePath(nf)
+      exec(['curl', '-s', '-f', '-H', clientHeader(), '-o', nf, repoUrl'?action=CLIENT&kind='kind'&version='latest'&file='urlEnc(f)])
+      good = 0
+      if fileExists(nf) then if File(nf.toString).length() > 0 then good = 1
+      if \good then do
+        say 'rxpip: could not download or write 'f' in 'dir' (permissions? try again as the owner of that directory)'
+        loop j = 1 to i
+          deletePath(dir'/'flist.word(j)'.new')
+        end
+        return 1
+      end
+    end
+    loop i = 1 to flist.words
+      f = flist.word(i)
+      Files.move(File((dir'/'f'.new').toString).toPath(), File((dir'/'f).toString).toPath(), replaceOpt())
+    end
+    deletePath(home'/netrexx/bin/Rxpip.class')   -- the launcher recompiles the new source
+    stampCheck(latest, '')
+    say 'rxpip: updated to 'latest
+    return 0
+
+  method stampCheck(latest=Rexx, minv=Rexx) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    today = Rexx(java.time.LocalDate.now().toString).changestr('-', '')
+    writeText(home'/clientcheck.txt', 'DATE: 'today || NL || 'LATEST: 'latest || NL || 'MIN: 'minv || NL)
+
+  method checkClientUpdate static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    if getConfig('CLIENT_CHECK').upper = 'OFF' then return
+    if env('RXPIP_NO_UPDATE_CHECK') \= '' then return
+    today = Rexx(java.time.LocalDate.now().toString).changestr('-', '')
+    f = home'/clientcheck.txt'
+    latest = ''
+    minv = ''
+    if fileExists(f) then do
+      txt = readText(f)
+      if stanzaField(txt, 'DATE') = today then do
+        latest = stanzaField(txt, 'LATEST')
+        minv = stanzaField(txt, 'MIN')
+      end
+    end
+    if latest = '' then do
+      m = serverGet('CLIENT', 'kind=netrexx')
+      if stanzaField(m, 'STATUS') = 'OK' then do
+        latest = stanzaField(m, 'LATEST')
+        minv = stanzaField(m, 'MIN')
+      end
+      stampCheck(latest, minv)
+    end
+    cur = clientVersion
+    if latest = '' then return
+    if compareVersions(latest, cur) <= 0 then return
+    if getConfig('AUTOUPDATE') = '1' then do
+      if doUpdate(0, 1) = 0 then do
+        errSay('rxpip: updated to 'latest' (run the command again to use it)')
+        exit 0
+      end
+      return
+    end
+    if minv \= '' then if compareVersions(cur, minv) < 0 then do
+      errSay('rxpip: this client ('cur') is too old for the server (needs 'minv'). Run: rxpip update')
+      return
+    end
+    errSay('rxpip: version 'latest' is available (you have 'cur'). Run: rxpip update')
+
+  /* rxpip admin stats [--days=N] | users | lock <user> |
+                client-publish <kind> --version=V [--min=V] <file>... */
+  method cmdAdmin(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    sub = argAt(a, 0).upper
+    t = resolveToken(a)
+    if sub = '' | ' STATS USERS LOCK CLIENT-PUBLISH '.pos(' 'sub' ') = 0 then do
+      say 'usage: rxpip admin stats [--days=N] | users | lock <user> | client-publish <kind> --version=V [--min=V] <file>...'
+      exit 1
+    end
+    if t = '' then do
+      say 'not logged in (rxpip login --token=T)'
+      exit 1
+    end
+    sec = ArrayList()
+    sec.add('X-Rxpip-Token: 't)
+    hdrs = ArrayList()
+    out = Rexx ''
+    select
+      when sub = 'STATS' then do
+        days = opt(a, 'days')
+        if days \= '' then hdrs.add('X-Rxpip-Days: 'days)
+        out = serverPost('ADMINSTATS', '', hdrs, sec, Rexx '')
+      end
+      when sub = 'USERS' then out = serverPost('ADMINUSERS', '', hdrs, sec, Rexx '')
+      when sub = 'LOCK' then do
+        u = argAt(a, 1)
+        if u = '' | u.left(2) = '--' then do
+          say 'usage: rxpip admin lock <user>'
+          exit 1
+        end
+        hdrs.add('X-Rxpip-User: 'u)
+        out = serverPost('ADMINLOCK', '', hdrs, sec, Rexx '')
+      end
+      otherwise do
+        kind = argAt(a, 1)
+        ver = opt(a, 'version')
+        minv = opt(a, 'min')
+        dir = Rexx ''
+        names = ArrayList()
+        loop i = 2 to a.length - 1
+          w = Rexx(a[i])
+          if w.left(2) = '--' then iterate
+          if \fileExists(w) then do
+            say 'rxpip: no such file: 'w
+            exit 1
+          end
+          fp = File(w.toString)
+          d = Rexx(fp.getAbsoluteFile().getParent())
+          if dir \= '' & d \= dir then do
+            say 'rxpip: all release files must be in one directory'
+            exit 1
+          end
+          dir = d
+          names.add(fp.getName())
+        end
+        if kind = '' | kind.left(2) = '--' | ver = '' | names.size() = 0 then do
+          say 'usage: rxpip admin client-publish <kind> --version=V [--min=V] <file>...'
+          exit 1
+        end
+        tgz = File.createTempFile('rxpip_rel_', '.tgz')
+        cmd = ArrayList()
+        cmd.add('tar'); cmd.add('czf'); cmd.add(tgz.getPath()); cmd.add('-C'); cmd.add(dir.toString)
+        cmd.addAll(names)
+        execList(cmd)
+        hdrs.add('X-Rxpip-Kind: 'kind)
+        hdrs.add('X-Rxpip-Version: 'ver)
+        if minv \= '' then hdrs.add('X-Rxpip-Min: 'minv)
+        out = serverPost('ADMINCLIENT', '', hdrs, sec, Rexx(tgz.getPath()))
+        tgz.delete()
+      end
+    end
+    exit showResponse(out)
+
+  /* =====================================================================
      HTTP (curl)
      ===================================================================== */
   method serverGet(action=Rexx, extra=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
     url = repoUrl'?action='action
     if extra \= '' then url = url'&'extra
     hfp = readHdrFile()
-    if hfp = '' then return exec(['curl', '-s', url])
-    r = exec(['curl', '-s', '-H', '@'hfp, url])
+    if hfp = '' then return exec(['curl', '-s', '--connect-timeout', '15', '-H', clientHeader(), url])
+    r = exec(['curl', '-s', '--connect-timeout', '15', '-H', clientHeader(), '-H', '@'hfp, url])
     deletePath(hfp)
     return r
 
@@ -909,9 +1111,9 @@ class Rxpip
     if ver \= '' then url = url'&version='urlEnc(ver)
     url = url'&kind='urlEnc(kind)'&platform='urlEnc(platform)
     hfp = readHdrFile()
-    if hfp = '' then exec(['curl', '-s', '-f', '-o', outfile, url])
+    if hfp = '' then exec(['curl', '-s', '-f', '-H', clientHeader(), '-o', outfile, url])
     else do
-      exec(['curl', '-s', '-f', '-o', outfile, '-H', '@'hfp, url])
+      exec(['curl', '-s', '-f', '-H', clientHeader(), '-o', outfile, '-H', '@'hfp, url])
       deletePath(hfp)
     end
     return lastRc
@@ -944,6 +1146,7 @@ class Rxpip
       Files.write(hf.toPath(), sb.toString().getBytes('UTF-8'), OpenOption[0])
       cmd = ArrayList()
       cmd.add('curl'); cmd.add('-s'); cmd.add('-X'); cmd.add('POST')
+      cmd.add('-H'); cmd.add(clientHeader().toString)
       cmd.add('-H'); cmd.add('@'hf.getPath())
       it6 = (hdrs).iterator()
       loop while it6.hasNext()

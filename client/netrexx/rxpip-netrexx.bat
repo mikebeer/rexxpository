@@ -1,4 +1,5 @@
 @echo off
+set "RXPIP_CLIENT_DIR=%~dp0"
 rem RXPIP NetRexx client launcher. Set NETREXX_JAR to NetRexxC.jar if it is not in this folder.
 if "%NETREXX_JAR%"=="" set "NETREXX_JAR=%~dp0NetRexxC.jar"
 if "%RXPIP_HOME%"=="" (set "RH=%USERPROFILE%\.rxpip") else (set "RH=%RXPIP_HOME%")

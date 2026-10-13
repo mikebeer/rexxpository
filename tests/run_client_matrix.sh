@@ -170,6 +170,29 @@ run_client() {
     out=$($RX publish "$d/lib1.rxpkg" --name=wrongplat$c --version=1.0.0 --platform=$other 2>&1)
     out=$($RX install wrongplat$c 2>&1);        expect "other-language artifact is not installed" "$out" "no compatible artifact"
   fi
+  # ---- version check, self-update and the administrator commands ----
+  local ccdir=$WORK/cc_$c relsrc rname
+  cp -r "$ROOT/client" "$ccdir"
+  local RX2=${RX/$ROOT\/client/$ccdir}
+  case $c in regina|oorexx) relsrc=$ccdir/rxpip.rexx;; netrexx) relsrc=$ccdir/netrexx/Rxpip.nrx;; crexx) relsrc=$ccdir/crexx/rxpip.crexx;; esac
+  rname=$(basename "$relsrc")
+  out=$($RX2 update --check 2>&1);              expect "update --check without a release" "$out" "no client release"
+  out=$($RX admin stats 2>&1);                  expect "a normal user cannot read the statistics" "$out" "FORBIDDEN"
+  adm addadmin $user >/dev/null
+  out=$($RX admin stats --days=2 2>&1);         expect "an administrator reads the statistics" "$out" "REQUESTS:"
+  expect "the statistics show this client kind" "$out" " $c "
+  out=$($RX admin users 2>&1);                  expect "admin users" "$out" "USER: $user"
+  mkdir -p "$WORK/rel_$c"; cp "$relsrc" "$WORK/rel_$c/"; echo '/* UPDATED-MARK */' >> "$WORK/rel_$c/$rname"
+  out=$($RX admin client-publish $c --version=99.0.0 --min=1.0.0 "$WORK/rel_$c/$rname" 2>&1); expect "client-publish" "$out" "LATEST: 99.0.0"
+  out=$($RX2 update --check 2>&1);              expect "update --check sees the new release" "$out" "99.0.0 is available"
+  rm -f "$RXPIP_HOME/clientcheck.txt"
+  out=$($RX2 search nothingatall 2>&1);         expect "the daily hint is shown" "$out" "version 99.0.0 is available"
+  out=$(RXPIP_NO_UPDATE_CHECK=1 $RX2 search nothingatall 2>&1); expect_not "and can be switched off" "$out" "is available"
+  grep -q UPDATED-MARK "$relsrc" && bad "client is untouched before update" "already updated" || ok "client is untouched before update"
+  out=$($RX2 update 2>&1);                      expect "update installs the new release" "$out" "updated to 99.0.0"
+  grep -q UPDATED-MARK "$relsrc" && ok "the client file was replaced" || bad "the client file was replaced" "$(tail -2 "$relsrc")"
+  [ -f "$relsrc.new" ] && bad "no temporary file left behind" "$relsrc.new" || ok "no temporary file left behind"
+  out=$($RX admin lock nobody 2>&1);            expect "admin lock of an unknown user" "$out" "NO_SUCH_USER"
   $RX logout >/dev/null 2>&1
   out=$($RX whoami 2>&1);                       expect "whoami after logout" "$out" "not logged in"
   ls /tmp 2>/dev/null | grep -q rxpip_hdr_ && bad "no token header file left behind" || ok "no token header file left behind"
