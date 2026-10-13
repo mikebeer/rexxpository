@@ -92,6 +92,7 @@ clen      = value('CONTENT_LENGTH',,'ENVIRONMENT')
 if clen = '' then clen = 0
 
 action = translate(QGet(qstring, 'ACTION'))
+if action \= 'PING' & action \= '' & action \= 'HOME' & action \= 'PKG' & action \= 'SIGNUP' & action \= 'REVIEW' then call LogEvent REPO_ROOT || '/.stats', 'REQ', lower(action)
 
 select
   when action = '' | action = 'HOME' then call Web_Home REPO_ROOT, AUTH_DIR, qstring
@@ -115,6 +116,11 @@ select
   when action = 'OWNERS'   then call Action_Owners    AUTH_DIR, qstring
   when action = 'ADDOWNER' then call Action_ChangeOwner AUTH_DIR, method_, 'ADD'
   when action = 'REMOVEOWNER' then call Action_ChangeOwner AUTH_DIR, method_, 'REMOVE'
+  when action = 'CLIENT'   then call Action_Client    REPO_ROOT, qstring
+  when action = 'ADMINCLIENT' then call Action_AdminClient REPO_ROOT, AUTH_DIR, method_, clen, MAX_UPLOAD
+  when action = 'ADMINSTATS' then call Action_AdminStats REPO_ROOT, AUTH_DIR, method_
+  when action = 'ADMINUSERS' then call Action_AdminUsers AUTH_DIR, method_
+  when action = 'ADMINLOCK'  then call Action_AdminLock  AUTH_DIR, method_
   when action = 'PUBLISH'  then call Action_Publish   REPO_ROOT, AUTH_DIR, method_, clen, MAX_UPLOAD
   otherwise do
     call TextHeader
@@ -301,6 +307,7 @@ Action_Download:
     call Fail 404, 'NOT_FOUND', "no " || kind || "/" || platform || " artifact for '" || name || "' " || ver
     return
   end
+  call LogEvent root || '/.stats', 'DL', name, ver, kind || '/' || platform
   sz = stream(artfile, 'c', 'query size')
   say 'Content-Type: application/octet-stream'
   say 'Content-Disposition: attachment; filename="' || name || '-' || ver || '-' || kind || '-' || platform || '.rxpkg"'
@@ -485,6 +492,7 @@ Action_Publish:
   call MoveFile stage, artfile
   call WriteArtifactRecord root, name, ver, kind, platform, filelist
   note = WriteMetaIfAbsent(root, name, ver, author, summary, requires)
+  call LogEvent root || '/.stats', 'PUB', name, ver, kind || '/' || platform
 
   call TextHeader
   say 'STATUS: OK'
@@ -1725,6 +1733,376 @@ Action_ChangeOwner: procedure
    It is entered only when GATEWAY_INTERFACE is unset, i.e. never via
    Apache/CGI, so there is no HTTP-reachable admin surface.
    ======================================================================= */
+/* =======================================================================
+   CLIENT RELEASES, STATISTICS and the ADMINISTRATOR role
+   -----------------------------------------------------------------------
+   repo/.clients/<kind>/<version>/  the files of a client release (kind =
+                                    regina, oorexx, netrexx or crexx) and
+                                    MANIFEST (FILES:/MIN:)
+   repo/.clients/<kind>/LATEST      the current version
+   repo/.stats/<yyyymmdd>.log       one line per request or event:
+                                    time|REQ|action|kind|version|os|uid
+                                    time|DL|pkg|version|artifact|kind|version|os|uid
+                                    time|PUB|pkg|version|artifact|kind|version|os|uid
+   repo/.stats/salt                 secret for the daily client id
+   .auth/admins                     one administrator per line
+
+   The statistics hold NO addresses and NO tokens: a client is only a
+   12-character hash of (address, day, secret salt), which cannot be
+   followed from one day to the next. Nothing here is served to the
+   public; only administrators can read it (ADMINSTATS, admin stats).
+   Logs older than 400 days are deleted. RXPIP_NOSTATS=1 switches the
+   recording off.
+   ======================================================================= */
+
+/* "kind|version|os" from the X-Rxpip-Client header (regina/1.2.0 (linux)) */
+ClientInfo: procedure
+  h = value('HTTP_X_RXPIP_CLIENT',,'ENVIRONMENT')
+  if h = '' | length(h) > 60 then return 'unknown|-|-'
+  if verify(h, 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./()_- ') > 0 then return 'unknown|-|-'
+  parse var h kind '/' rest
+  parse var rest ver '(' os ')' .
+  kind = Lower(strip(kind)); ver = strip(ver); os = translate(Lower(strip(os)), '_', ' ')
+  if kind = '' | ver = '' then return 'unknown|-|-'
+  if os = '' then os = '-'
+  return kind || '|' || ver || '|' || os
+
+/* the pseudonymous id of the caller for today */
+DailyId: procedure
+  parse arg statdir, day
+  salt = statdir || '/salt'
+  if \FileExists(salt) then do
+    s = RandomHex(16)
+    if s = '' then return 'x'
+    call WriteNew salt, s || '0a'x
+  end
+  sv = ''
+  if FileExists(salt) then do
+    sv = strip(linein(salt))
+    call stream salt, 'c', 'close'
+  end
+  h = Sha256Hex(value('REMOTE_ADDR',,'ENVIRONMENT') || '|' || day || '|' || sv)
+  if h = '' then return 'x'
+  return left(h, 12)
+
+/* append one line to today's log; type REQ, DL or PUB */
+LogEvent: procedure
+  parse arg statdir, type, a1, a2, a3
+  if value('RXPIP_NOSTATS',,'ENVIRONMENT') = '1' then return
+  call EnsureDir statdir
+  day = date('S')
+  f = statdir || '/' || day || '.log'
+  fresh = \FileExists(f)
+  line = time() || '|' || type
+  if type = 'REQ' then line = line || '|' || a1
+  else line = line || '|' || a1 || '|' || a2 || '|' || a3
+  line = line || '|' || ClientInfo() || '|' || DailyId(statdir, day)
+  call charout f, line || '0a'x
+  call stream f, 'c', 'close'
+  if fresh then call PruneStats statdir
+  return
+
+PruneStats: procedure
+  parse arg statdir
+  tmp = TempDir() || '/rxpip_st_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
+  call ListDirNames statdir, tmp
+  cutoff = date('B') - 400
+  do while lines(tmp) > 0
+    n = strip(linein(tmp))
+    if length(n) = 12 & right(n, 4) = '.log' & datatype(left(n, 8), 'W') then do
+      if date('B', left(n, 8), 'S') < cutoff then call DelFile statdir || '/' || n
+    end
+  end
+  call stream tmp, 'c', 'close'
+  call DelFile tmp
+  return
+
+/* ---- administrators ----------------------------------------------------- */
+AdminsStr: procedure
+  parse arg authdir
+  f = authdir || '/admins'
+  out = ''
+  if FileExists(f) then do
+    do while lines(f) > 0
+      l = strip(linein(f))
+      if l \= '' then out = out l
+    end
+    call stream f, 'c', 'close'
+  end
+  return strip(out)
+
+IsAdmin: procedure
+  parse arg authdir, user
+  return user \= '' & wordpos(user, AdminsStr(authdir)) > 0
+
+WriteAdmins: procedure
+  parse arg authdir, list
+  c = ''
+  do i = 1 to words(list)
+    c = c || word(list, i) || '0a'x
+  end
+  call ReplaceFile authdir || '/admins', c
+  return
+
+/* like Authenticate, and the user must be an administrator */
+AuthenticateAdmin: procedure
+  parse arg authdir, method_
+  u = Authenticate(authdir, method_)
+  if u = '' then return ''
+  if \IsAdmin(authdir, u) then do
+    call Fail 403, 'FORBIDDEN', 'administrators only'
+    return ''
+  end
+  return u
+
+/* ---- client releases ---------------------------------------------------- */
+ClientLatest: procedure
+  parse arg root, kind
+  f = root || '/.clients/' || kind || '/LATEST'
+  if \FileExists(f) then return ''
+  v = strip(linein(f))
+  call stream f, 'c', 'close'
+  return v
+
+/* GET action=CLIENT&kind=K [&version=V] [&file=F]
+   no file: the manifest; with file: the bytes. Public, also in a closed
+   repository (clients must be able to update themselves). */
+Action_Client: procedure
+  parse arg root, qstring
+  kind = Lower(QGet(qstring, 'KIND'))
+  if \IsSafeToken(kind) then do
+    call Fail 400, 'BAD_KIND', 'invalid client kind'
+    return
+  end
+  ver = QGet(qstring, 'VERSION')
+  if ver = '' then ver = ClientLatest(root, kind)
+  if ver = '' | \IsSafeVersion(ver) | \FileExists(root || '/.clients/' || kind || '/' || ver || '/MANIFEST') then do
+    call Fail 404, 'NOT_FOUND', 'no client release for ' || kind
+    return
+  end
+  dir = root || '/.clients/' || kind || '/' || ver
+  files = FileField(dir || '/MANIFEST', 'FILES')
+  file = QGet(qstring, 'FILE')
+  if file = '' then do
+    call TextHeader
+    say 'STATUS: OK'
+    say 'KIND:' kind
+    say 'VERSION:' ver
+    say 'LATEST:' ClientLatest(root, kind)
+    say 'MIN:' FileField(dir || '/MANIFEST', 'MIN')
+    say 'FILES:' files
+    return
+  end
+  if wordpos(file, files) = 0 | \IsSafeFileName(file) then do
+    call Fail 404, 'NOT_FOUND', 'no such file in the release'
+    return
+  end
+  path = dir || '/' || file
+  sz = stream(path, 'c', 'query size')
+  say 'Content-Type: application/octet-stream'
+  say 'Content-Length:' sz
+  say ''
+  data = charin(path, 1, sz)
+  call stream path, 'c', 'close'
+  call charout , data
+  return
+
+/* POST (administrator): body = tar.gz of the release files; headers
+   X-Rxpip-Kind, X-Rxpip-Version, optional X-Rxpip-Min (oldest client that
+   still works). Releases are immutable. */
+Action_AdminClient: procedure
+  parse arg root, authdir, method_, clen, maxup
+  u = AuthenticateAdmin(authdir, method_)
+  if u = '' then return
+  qs = value('QUERY_STRING',,'ENVIRONMENT')
+  kind = Lower(strip(HdrOrQuery('HTTP_X_RXPIP_KIND', qs, 'KIND')))
+  ver = HdrOrQuery('HTTP_X_RXPIP_VERSION', qs, 'VERSION')
+  minv = HdrOrQuery('HTTP_X_RXPIP_MIN', qs, 'MIN')
+  if \IsSafeToken(kind) | \IsSafeVersion(ver) | (minv \= '' & \IsSafeVersion(minv)) then do
+    call Fail 400, 'BAD_RELEASE', 'kind, version (and min) must be valid'
+    return
+  end
+  if \datatype(clen, 'W') then clen = 0
+  if clen < 1 | clen > maxup then do
+    call Fail 400, 'BAD_BODY', 'missing or too large release archive'
+    return
+  end
+  dir = root || '/.clients/' || kind || '/' || ver
+  if FileExists(dir || '/MANIFEST') then do
+    call Fail 409, 'ALREADY_EXISTS', 'client release ' || kind || ' ' || ver || ' already exists'
+    return
+  end
+  stage = root || '/.staging'
+  call EnsureDir stage
+  stage = stage || '/client_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
+  data = charin(, , clen)
+  call charout stage, data
+  call stream stage, 'c', 'close'
+  data = ''
+  v = ValidateArchive(stage)
+  parse var v vstat '01'x vrest
+  if vstat \= 'OK' then do
+    call DelFile stage
+    call Fail 400, 'BAD_ARCHIVE', vrest
+    return
+  end
+  call EnsureDir dir
+  'tar xzf "' || stage || '" -C "' || dir || '" 2>' || NullSink()
+  call DelFile stage
+  call ReplaceFile dir || '/MANIFEST', 'FILES: ' || vrest || '0a'x || 'MIN: ' || minv || '0a'x
+  /* LATEST only moves forward */
+  cur = ClientLatest(root, kind)
+  if cur = '' | CompareVersions(ver, cur) > 0 then call ReplaceFile root || '/.clients/' || kind || '/LATEST', ver || '0a'x
+  call TextHeader
+  say 'STATUS: OK'
+  say 'KIND:' kind
+  say 'VERSION:' ver
+  say 'FILES:' vrest
+  say 'LATEST:' ClientLatest(root, kind)
+  return
+
+/* ---- administrator actions ------------------------------------------------ */
+Action_AdminUsers: procedure
+  parse arg authdir, method_
+  u = AuthenticateAdmin(authdir, method_)
+  if u = '' then return
+  names = DirBasesStr(authdir || '/users', '.user')
+  call TextHeader
+  say 'STATUS: OK'
+  say 'COUNT:' words(names)
+  say ''
+  do i = 1 to words(names)
+    nm = word(names, i)
+    adm = ''
+    if IsAdmin(authdir, nm) then adm = ' admin'
+    say 'USER:' nm || ' tokens:' words(UserTokenIds(authdir, nm)) || adm
+  end
+  return
+
+Action_AdminLock: procedure
+  parse arg authdir, method_
+  u = AuthenticateAdmin(authdir, method_)
+  if u = '' then return
+  qs = value('QUERY_STRING',,'ENVIRONMENT')
+  target = HdrOrQuery('HTTP_X_RXPIP_USER', qs, 'USER')
+  if \IsSafeUser(target) | \UserExists(authdir, target) then do
+    call Fail 404, 'NO_SUCH_USER', 'no such user'
+    return
+  end
+  ids = UserTokenIds(authdir, target)
+  do i = 1 to words(ids)
+    call DelFile authdir || '/tokens/' || word(ids, i) || '.tok'
+  end
+  call TextHeader
+  say 'STATUS: OK'
+  say 'USER:' target
+  say 'REVOKED:' words(ids)
+  return
+
+Action_AdminStats: procedure
+  parse arg root, authdir, method_
+  u = AuthenticateAdmin(authdir, method_)
+  if u = '' then return
+  qs = value('QUERY_STRING',,'ENVIRONMENT')
+  days = HdrOrQuery('HTTP_X_RXPIP_DAYS', qs, 'DAYS')
+  call TextHeader
+  say 'STATUS: OK'
+  say StatsReport(root, days)
+  return
+
+/* the report: plain text, also used by `admin stats` on the server */
+StatsReport: procedure
+  parse arg root, days
+  if \datatype(days, 'W') then days = 30
+  if days < 1 then days = 1
+  if days > 400 then days = 400
+  statdir = root || '/.stats'
+  tmp = TempDir() || '/rxpip_sr_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
+  call ListDirNames statdir, tmp
+  from = date('B') - days + 1
+  files = ''
+  if FileExists(tmp) then do
+    do while lines(tmp) > 0
+      n = strip(linein(tmp))
+      if length(n) = 12 & right(n, 4) = '.log' & datatype(left(n, 8), 'W') then do
+        if date('B', left(n, 8), 'S') >= from then files = files left(n, 8)
+      end
+    end
+    call stream tmp, 'c', 'close'
+  end
+  call DelFile tmp
+  nreq = 0; ndl = 0; npub = 0
+  ckeys = ''; pkeys = ''; dayrows = ''
+  do fi = 1 to words(files)
+    day = word(files, fi)
+    f = statdir || '/' || day || '.log'
+    dreq = 0; dids = ''
+    do while lines(f) > 0
+      l = linein(f)
+      parse var l tm '|' type '|' rest
+      if type = 'REQ' then do
+        parse var rest act '|' ck '|' cv '|' cos '|' uid
+        nreq = nreq + 1; dreq = dreq + 1
+        if uid \= '' & wordpos(uid, dids) = 0 then dids = dids uid
+        if uid \= '' then do
+          ckey = ck || '~' || cv || '~' || cos
+          if wordpos(ckey, ckeys) = 0 then do
+            ckeys = ckeys ckey
+            cmarks.ckey = ''
+          end
+          mark = day || ':' || uid
+          if wordpos(mark, cmarks.ckey) = 0 then cmarks.ckey = cmarks.ckey mark
+        end
+      end
+      else if type = 'DL' then do
+        parse var rest pk '|' pv '|' pa '|' ck '|' cv '|' cos '|' uid
+        ndl = ndl + 1
+        if wordpos(pk, pkeys) = 0 then do
+          pkeys = pkeys pk
+          pdl.pk = 0; pdays.pk = ''
+        end
+        pdl.pk = pdl.pk + 1
+        mark = day || ':' || uid
+        if wordpos(mark, pdays.pk) = 0 then pdays.pk = pdays.pk mark
+      end
+      else if type = 'PUB' then npub = npub + 1
+    end
+    call stream f, 'c', 'close'
+    dayrows = dayrows || '  ' || day || '  requests ' || right(dreq, 5) || '  clients ' || right(words(dids), 4) || '0a'x
+  end
+  out = 'PERIOD: last ' || days || ' day(s), ' || words(files) || ' with data' || '0a'x
+  out = out || 'REQUESTS: ' || nreq || '0a'x || 'DOWNLOADS: ' || ndl || '0a'x || 'PUBLISHES: ' || npub || '0a'x || '0a'x
+  out = out || 'PER-DAY:' || '0a'x || dayrows || '0a'x
+  out = out || 'CLIENTS (kind version os, client-days; * = older than the latest release):' || '0a'x
+  none = 1
+  do i = 1 to words(ckeys)
+    ckey = word(ckeys, i)
+    parse var ckey ck '~' cv '~' cos
+    star = ' '
+    latest = ''
+    if IsSafeToken(ck) then latest = ClientLatest(root, ck)
+    if latest \= '' & IsSafeVersion(cv) then if CompareVersions(cv, latest) < 0 then star = '*'
+    out = out || '  ' || star || left(ck, 10) || left(cv, 10) || left(cos, 12) || right(words(cmarks.ckey), 6) || '0a'x
+    none = 0
+  end
+  if none then out = out || '  (none)' || '0a'x
+  out = out || '0a'x || 'TOP DOWNLOADS (package, downloads, client-days):' || '0a'x
+  used = ''
+  do rank = 1 to 20
+    best = ''; bn = -1
+    do i = 1 to words(pkeys)
+      k = word(pkeys, i)
+      if wordpos(k, used) = 0 & pdl.k > bn then do
+        best = k; bn = pdl.k
+      end
+    end
+    if best = '' then leave
+    used = used best
+    out = out || '  ' || left(best, 24) || right(pdl.best, 6) || right(words(pdays.best), 8) || '0a'x
+  end
+  if used = '' then out = out || '  (none)' || '0a'x
+  return out
+
 AdminMain: procedure
   parse arg authdir, a
   parse var a sub p1 p2 rest
@@ -1793,6 +2171,24 @@ AdminMain: procedure
       if IsPrivate(authdir, p1) then say p1 || ': private, readers:' ReadersStr(authdir, p1)
       else say p1 || ': public'
     end
+    when sub = 'ADDADMIN' then do
+      if \UserExists(authdir, p1) then do; say 'rxpip-admin: no such user'; return 1; end
+      if \IsAdmin(authdir, p1) then call WriteAdmins authdir, AdminsStr(authdir) p1
+      say 'administrators:' AdminsStr(authdir)
+    end
+    when sub = 'RMADMIN' then do
+      new = ''
+      do i = 1 to words(AdminsStr(authdir))
+        if word(AdminsStr(authdir), i) \= p1 then new = new word(AdminsStr(authdir), i)
+      end
+      call WriteAdmins authdir, strip(new)
+      say 'administrators:' AdminsStr(authdir)
+    end
+    when sub = 'ADMINS' then say 'administrators:' AdminsStr(authdir)
+    when sub = 'STATS' then do       /* stats [days] */
+      root = left(authdir, length(authdir) - length('/.auth'))
+      say StatsReport(root, p1)
+    end
     when sub = 'SETOWNERS' then do   /* setowners <pkg> <user>...  (recovery) */
       list = rest
       if \IsSafeToken(p1) | list = '' then do; say 'rxpip-admin: usage: setowners <pkg> <user> [<user>...]'; return 1; end
@@ -1814,6 +2210,10 @@ AdminMain: procedure
       say '  owners <pkg>             show owners'
       say '  visibility <pkg> [public|private]   show / set a package''s visibility'
       say '  setowners <pkg> <u>...   replace the owner list (account recovery)'
+      say '  addadmin <user>          make a user an administrator (remote admin + statistics)'
+      say '  rmadmin <user>           remove administrator rights'
+      say '  admins                   list administrators'
+      say '  stats [days]             usage statistics (default 30 days)'
     end
   end
   return 0

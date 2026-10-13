@@ -539,6 +539,60 @@ expect_not "and private again hides it" "$(getT "" action=LIST)" "secretlib"
 expect "admin visibility shows it" "$(adm visibility secretlib)" "secretlib: private"
 
 # ============================================================================
+section "statistics, client releases and the administrator role"
+UCLI=(-H "X-Rxpip-Client: regina/1.0.0 (linux)")
+curl -s "${UCLI[@]}" "$BASE?action=LIST" >/dev/null
+curl -s "${UCLI[@]}" "$BASE?action=DOWNLOAD&name=mathutils&version=1.0.0" >/dev/null
+curl -s -H "X-Rxpip-Client: oorexx/9.9.9 (windows)" "$BASE?action=LIST" >/dev/null
+ls "$REPO/.stats"/*.log >/dev/null 2>&1 && ok "a daily log is written" || bad "a daily log is written"
+LOGS=$(cat "$REPO"/.stats/*.log)
+expect "requests are logged with client kind and version" "$LOGS" "|regina|1.0.0|linux|"
+expect "downloads are logged with the package" "$LOGS" "|DL|mathutils|1.0.0|SOURCE/any|"
+expect_not "no address is stored" "$LOGS" "127.0.0.1"
+expect_not "no token is stored" "$LOGS" "$TOKA"
+expect_not "PING is not logged" "$(grep -c '|REQ|ping|' <<<"$LOGS")" "1"
+# stats are not public
+expect "ADMINSTATS without a token is refused" "$(curl -s "$BASE?action=ADMINSTATS")" "METHOD_NOT_ALLOWED"
+BODYS=$(curl -s -X POST -H "X-Rxpip-Token: $TOKA" "$BASE?action=ADMINSTATS")
+expect "a normal user cannot read the statistics" "$BODYS" "FORBIDDEN"
+expect_not "and sees no numbers" "$BODYS" "REQUESTS:"
+adm addadmin alice >/dev/null
+expect "admins lists alice" "$(adm admins)" "alice"
+BODYS=$(curl -s -X POST -H "X-Rxpip-Token: $TOKA" "$BASE?action=ADMINSTATS")
+expect "an administrator reads the report" "$BODYS" "REQUESTS:"
+expect "the report shows downloads" "$BODYS" "mathutils"
+expect "the report lists client versions" "$BODYS" "oorexx"
+expect "bob is still refused" "$(curl -s -X POST -H "X-Rxpip-Token: $TOKB" "$BASE?action=ADMINSTATS")" "FORBIDDEN"
+expect "the CLI report works too" "$(adm stats 7)" "TOP DOWNLOADS"
+expect "admin users listing" "$(curl -s -X POST -H "X-Rxpip-Token: $TOKA" "$BASE?action=ADMINUSERS")" "USER: alice"
+expect "bob cannot list users" "$(curl -s -X POST -H "X-Rxpip-Token: $TOKB" "$BASE?action=ADMINUSERS")" "FORBIDDEN"
+# client releases
+mkdir -p "$WORK/rel"; echo 'say 1' > "$WORK/rel/rxpip.rexx"; echo 'say 2' > "$WORK/rel/extra.txt"
+tar czf "$WORK/rel.tgz" -C "$WORK/rel" rxpip.rexx extra.txt
+expect "no release yet" "$(curl -s "$BASE?action=CLIENT&kind=regina")" "NOT_FOUND"
+c=$(curl -s -X POST -H "X-Rxpip-Token: $TOKB" -H "X-Rxpip-Kind: regina" -H "X-Rxpip-Version: 1.1.0" --data-binary @"$WORK/rel.tgz" "$BASE?action=ADMINCLIENT")
+expect "a normal user cannot publish a client" "$c" "FORBIDDEN"
+c=$(curl -s -X POST -H "X-Rxpip-Token: $TOKA" -H "X-Rxpip-Kind: regina" -H "X-Rxpip-Version: 1.1.0" -H "X-Rxpip-Min: 1.0.0" --data-binary @"$WORK/rel.tgz" "$BASE?action=ADMINCLIENT")
+expect "an administrator publishes a client release" "$c" "LATEST: 1.1.0"
+expect "re-publishing a release is refused" "$(curl -s -X POST -H "X-Rxpip-Token: $TOKA" -H "X-Rxpip-Kind: regina" -H "X-Rxpip-Version: 1.1.0" --data-binary @"$WORK/rel.tgz" "$BASE?action=ADMINCLIENT")" "ALREADY_EXISTS"
+M=$(curl -s "$BASE?action=CLIENT&kind=regina")
+expect "manifest is public and names the version" "$M" "VERSION: 1.1.0"
+expect "manifest lists the files" "$M" "FILES: rxpip.rexx extra.txt"
+expect "manifest carries the minimum" "$M" "MIN: 1.0.0"
+expect "a release file can be fetched" "$(curl -s "$BASE?action=CLIENT&kind=regina&file=rxpip.rexx")" "say 1"
+expect "a file outside the manifest is refused" "$(curl -s "$BASE?action=CLIENT&kind=regina&file=..%2F..%2F.auth%2Fusers")" "NOT_FOUND"
+expect "bad kind is refused" "$(curl -s "$BASE?action=CLIENT&kind=..%2Fx")" "BAD_KIND"
+curl -s -X POST -H "X-Rxpip-Token: $TOKA" -H "X-Rxpip-Kind: regina" -H "X-Rxpip-Version: 1.0.5" --data-binary @"$WORK/rel.tgz" "$BASE?action=ADMINCLIENT" >/dev/null
+expect "LATEST never moves backwards" "$(curl -s "$BASE?action=CLIENT&kind=regina")" "LATEST: 1.1.0"
+expect "old clients are starred in the report" "$(curl -s -X POST -H "X-Rxpip-Token: $TOKA" "$BASE?action=ADMINSTATS")" "*regina"
+expect "locking revokes a user's tokens" "$(curl -s -X POST -H "X-Rxpip-Token: $TOKA" -H "X-Rxpip-User: bob" "$BASE?action=ADMINLOCK")" "REVOKED: 1"
+expect "the locked user's token is dead" "$(curl -s -X POST -H "X-Rxpip-Token: $TOKB" "$BASE?action=WHOAMI")" "BAD_TOKEN"
+TOKB=$(adm newtoken bob | sed 's/.*: //')
+adm rmadmin alice >/dev/null
+expect "removed administrators are refused again" "$(curl -s -X POST -H "X-Rxpip-Token: $TOKA" "$BASE?action=ADMINSTATS")" "FORBIDDEN"
+adm addadmin alice >/dev/null
+
+# ============================================================================
 section "closed repository (RXPIP_CLOSED=1)"
 CPORT=$((PORT+1))
 RXPIP_CLOSED=1 python3 "$ROOT/tests/cgi_harness.py" --port "$CPORT" \
@@ -560,6 +614,7 @@ expect "a garbage token is refused" "$(cg "rxp_00000000_000000000000000000000000
 expect "web home says the repository is private" "$(curl -s "$CBASE")" "Private repository"
 expect_not "web home lists nothing" "$(curl -s "$CBASE")" "mathutils"
 expect "sign-up stays reachable" "$(curl -s "$CBASE?action=SIGNUP")" "<form"
+expect "client releases stay public" "$(curl -s "$CBASE?action=CLIENT&kind=regina")" "VERSION: 1.1.0"
 kill $CPID 2>/dev/null
 
 # ============================================================================
