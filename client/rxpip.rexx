@@ -83,6 +83,7 @@ call EnsureDir home
 call EnsureDir home || '/lib'
 call EnsureDir home || '/cache'
 call LoadOrInitConfig home
+cfg.READTOKEN = ResolveToken(home, cfg.REPO_URL, '')   /* sent with every read, for private packages */
 
 parse var allargs cmd '01'x rest
 cmd = translate(cmd)
@@ -114,6 +115,8 @@ select
   when cmd = 'WHOAMI'    then call CmdWhoami
   when cmd = 'TOKEN'     then call CmdToken rest
   when cmd = 'OWNER'     then call CmdOwner rest
+  when cmd = 'VISIBILITY' then call CmdVisibility rest
+  when cmd = 'READER'    then call CmdReader rest
   when cmd = 'HELP'      then call CmdHelp
   when cmd = ''          then call CmdHelp
   otherwise do
@@ -149,12 +152,14 @@ CmdHelp:
   say '  scan <file.rexx>            install packages named in /* REQUIRE */'
   say '  run <file.rexx> [args]      scan + auto-install, merge, then execute'
   say '  build <file.rexx> [--output=out]  scan + auto-install, write merged standalone .rexx'
-  say '  publish <pkgfile> --name=N --version=V [...]   upload a package (needs login)'
+  say '  publish <pkgfile> --name=N --version=V [...] [--private]   upload a package (needs login)'
   say '  register --user=U --invite=CODE   create an account (invite-only); saves your token'
   say '  login [--token=T]           save a token (or read it from env RXPIP_TOKEN)'
   say '  logout | whoami             forget / show the saved login'
   say '  token new [--label=L] | list | revoke <id>   manage your API tokens'
   say '  owner list|add|remove <pkg> [user]   manage who may publish a package'
+  say '  visibility <pkg> [public|private]   show / set whether a package is public (owners)'
+  say '  reader list|add|remove <pkg> [user]   who may read a private package besides its owners'
   say '  config get|set <key> [val]  view/change REPO_URL, LIB_DIR, INTERPRETER'
   say '  path                        show the library directory and how to put it on PATH'
   say '  help                        this message'
@@ -727,12 +732,12 @@ MergeScript: procedure
   end
   return
 
-CmdPublish: procedure expose home
+CmdPublish: procedure expose home cfg.
   parse arg args
   parse var args pkgfile '01'x .
   if pkgfile = '' | \FileExists(pkgfile) then do
     say 'usage: rxpip publish <file.rxpkg> --name=X --version=Y [--token=T]' ,
-        '[--author=A --summary=S --requires=R --kind=SOURCE|BYTECODE --platform=TAG]'
+        '[--author=A --summary=S --requires=R --kind=SOURCE|BYTECODE --platform=TAG --private|--public]'
     exit 1
     return
   end
@@ -757,7 +762,10 @@ CmdPublish: procedure expose home
     exit 1
     return
   end
-  rc = ServerPublish(cfg.REPO_URL, pkgfile, name, ver, author, summary, requires, kind, platform, token)
+  vis = ''
+  if HasFlag(args, '--private') then vis = 'private'
+  if HasFlag(args, '--public') then vis = 'public'
+  rc = ServerPublish(cfg.REPO_URL, pkgfile, name, ver, author, summary, requires, kind, platform, token, vis)
   exit rc
   return
 
@@ -936,7 +944,7 @@ CmdToken: procedure expose home
   exit rc
   return
 
-CmdOwner: procedure expose home
+CmdOwner: procedure expose home cfg.
   parse arg sub '01'x pkg '01'x who '01'x .
   sub = translate(sub)
   repo = GetConfigValue(home, 'REPO_URL')
@@ -962,6 +970,53 @@ CmdOwner: procedure expose home
     return
   end
   out = ServerPost(repo, sub || 'OWNER', '', 'X-Rxpip-Name: ' || pkg || '01'x || 'X-Rxpip-User: ' || who, 'X-Rxpip-Token: ' || t, '')
+  rc = ShowResponse(out)
+  exit rc
+  return
+
+/* rxpip visibility <pkg> [public|private]  -- owners; without a value, show it */
+CmdVisibility: procedure expose home cfg.
+  parse arg pkg '01'x val '01'x .
+  repo = GetConfigValue(home, 'REPO_URL')
+  val = translate(val, 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+  if pkg = '' | (val \= '' & val \= 'public' & val \= 'private') then do
+    say 'usage: rxpip visibility <pkg> [public|private]'
+    exit 1
+    return
+  end
+  t = ResolveToken(home, repo, '')
+  if t = '' then do
+    say 'not logged in (rxpip login --token=T)'
+    exit 1
+    return
+  end
+  if val = '' then out = ServerPost(repo, 'READERS', '', 'X-Rxpip-Name: ' || pkg, 'X-Rxpip-Token: ' || t, '')
+  else out = ServerPost(repo, 'VISIBILITY', '', 'X-Rxpip-Name: ' || pkg || '01'x || 'X-Rxpip-Value: ' || val, 'X-Rxpip-Token: ' || t, '')
+  rc = ShowResponse(out)
+  exit rc
+  return
+
+/* rxpip reader list <pkg> | add <pkg> <user> | remove <pkg> <user>
+   -- who may read a private package besides its owners */
+CmdReader: procedure expose home cfg.
+  parse arg sub '01'x pkg '01'x who '01'x .
+  sub = translate(sub)
+  repo = GetConfigValue(home, 'REPO_URL')
+  if pkg = '' | (sub \= 'LIST' & who = '') | wordpos(sub, 'LIST ADD REMOVE') = 0 then do
+    say 'usage: rxpip reader list <pkg> | add <pkg> <user> | remove <pkg> <user>'
+    exit 1
+    return
+  end
+  t = ResolveToken(home, repo, '')
+  if t = '' then do
+    say 'not logged in (rxpip login --token=T)'
+    exit 1
+    return
+  end
+  act = 'READERS'
+  if sub = 'ADD' then act = 'ADDREADER'
+  if sub = 'REMOVE' then act = 'REMOVEREADER'
+  out = ServerPost(repo, act, '', 'X-Rxpip-Name: ' || pkg || '01'x || 'X-Rxpip-User: ' || who, 'X-Rxpip-Token: ' || t, '')
   rc = ShowResponse(out)
   exit rc
   return
@@ -1008,6 +1063,7 @@ LoadOrInitConfig: procedure expose cfg. home
   cfg.INTERPRETER = GetConfigValue(home, 'INTERPRETER')
   cfg.UPGRADE = 0
   cfg.FORCEOW = 0
+  cfg.READTOKEN = ''
   return
 
 GetConfigValue: procedure
@@ -1235,12 +1291,17 @@ RecordInstalled: procedure
    ======================================================================= */
 
 /* GET <repo_url>?action=X&<extra>  ->  full response body (text) */
-ServerGet: procedure
+ServerGet: procedure expose cfg.
   parse arg repo, action, extra
   url = repo || '?action=' || action
   if extra \= '' then url = url || '&' || extra
   tmp = TempDir() || '/rxpip_resp_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
-  'curl -s -o "' || tmp || '" "' || url || '"'
+  hf = ReadHeaderFile()
+  if hf = '' then 'curl -s -o "' || tmp || '" "' || url || '"'
+  else do
+    'curl -s -o "' || tmp || '" -H @"' || hf || '" "' || url || '"'
+    call DelFile hf
+  end
   out = ''
   if FileExists(tmp) then do
     do while lines(tmp) > 0
@@ -1251,13 +1312,39 @@ ServerGet: procedure
   call DelFile tmp
   return out
 
+/* a private temporary header file carrying the token for a read request
+   (private packages), or '' when there is no token. The token never goes
+   on a command line or in a URL. */
+ReadHeaderFile: procedure expose cfg.
+  if cfg.READTOKEN = '' then return ''
+  return MakeSecretFile('X-Rxpip-Token: ' || cfg.READTOKEN)
+
+MakeSecretFile: procedure
+  parse arg secrets
+  hdrfile = TempDir() || '/rxpip_hdr_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
+  if IsWindows() then do
+    call charout hdrfile, translate(secrets, '0a'x, '01'x) || '0d0a'x
+    call stream hdrfile, 'c', 'close'
+  end
+  else do
+    call value 'RXPIP_SECRET_HDRS', translate(secrets, '0a'x, '01'x), 'ENVIRONMENT'
+    '(umask 077; printf "%s\n" "$RXPIP_SECRET_HDRS" > "' || hdrfile || '")'
+    call value 'RXPIP_SECRET_HDRS', '', 'ENVIRONMENT'
+  end
+  return hdrfile
+
 /* download one specific artifact (kind/platform) to outfile; 0 on success */
-ServerDownload: procedure
+ServerDownload: procedure expose cfg.
   parse arg repo, name, ver, kind, platform, outfile
   url = repo || '?action=DOWNLOAD&name=' || UrlEncode(name)
   if ver \= '' then url = url || '&version=' || UrlEncode(ver)
   url = url || '&kind=' || UrlEncode(kind) || '&platform=' || UrlEncode(platform)
-  'curl -s -f -o "' || outfile || '" "' || url || '"'
+  hf = ReadHeaderFile()
+  if hf = '' then 'curl -s -f -o "' || outfile || '" "' || url || '"'
+  else do
+    'curl -s -f -o "' || outfile || '" -H @"' || hf || '" "' || url || '"'
+    call DelFile hf
+  end
   if \FileExists(outfile) then return 1
   sz = stream(outfile, 'c', 'query size')
   if sz = 0 then return 1
@@ -1274,17 +1361,8 @@ ServerPost: procedure
   url = repo || '?action=' || action
   if extra \= '' then url = url || '&' || extra
   uniq = translate(time('L'), '__', ':.') || '_' || random(1,99999)
-  hdrfile = TempDir() || '/rxpip_hdr_' || uniq || '.tmp'
+  hdrfile = MakeSecretFile(secrets)
   tmp = TempDir() || '/rxpip_post_' || uniq || '.tmp'
-  if IsWindows() then do
-    call charout hdrfile, translate(secrets, '0a'x, '01'x) || '0d0a'x
-    call stream hdrfile, 'c', 'close'
-  end
-  else do
-    call value 'RXPIP_SECRET_HDRS', translate(secrets, '0a'x, '01'x), 'ENVIRONMENT'
-    '(umask 077; printf "%s\n" "$RXPIP_SECRET_HDRS" > "' || hdrfile || '")'
-    call value 'RXPIP_SECRET_HDRS', '', 'ENVIRONMENT'
-  end
   cmd = 'curl -s -o "' || tmp || '" -X POST -H @"' || hdrfile || '"'
   do while hdrs \= ''
     parse var hdrs h '01'x hdrs
@@ -1308,7 +1386,7 @@ ServerPost: procedure
 /* publish a package: raw artifact bytes as the POST body, metadata as
    X-Rxpip-* headers (non-secret) and the token as a secret header */
 ServerPublish: procedure
-  parse arg repo, pkgfile, name, ver, author, summary, requires, kind, platform, token
+  parse arg repo, pkgfile, name, ver, author, summary, requires, kind, platform, token, vis
   hdrs = 'X-Rxpip-Name: ' || name || '01'x ||,
          'X-Rxpip-Version: ' || ver || '01'x ||,
          'X-Rxpip-Author: ' || author || '01'x ||,
@@ -1316,6 +1394,7 @@ ServerPublish: procedure
          'X-Rxpip-Requires: ' || requires || '01'x ||,
          'X-Rxpip-Kind: ' || kind || '01'x ||,
          'X-Rxpip-Platform: ' || platform
+  if vis \= '' then hdrs = hdrs || '01'x || 'X-Rxpip-Visibility: ' || vis
   out = ServerPost(repo, 'PUBLISH', '', hdrs, 'X-Rxpip-Token: ' || token, pkgfile)
   return ShowResponse(out)
 
@@ -1473,6 +1552,10 @@ UrlEncode: procedure
 
 /* args is '01'x-delimited (see main dispatch); this preserves values
    with embedded spaces, e.g. --summary="a description with spaces" */
+HasFlag: procedure
+  parse arg args, flag
+  return pos('01'x || flag || '01'x, '01'x || args || '01'x) > 0
+
 OptValue: procedure
   parse arg args, key
   needle = '--' || key || '='
