@@ -94,6 +94,7 @@ select
   when cmd = 'SEARCH'    then call CmdSearch rest
   when cmd = 'SHOW'      then call CmdShow rest
   when cmd = 'FREEZE'    then call CmdFreeze
+  when cmd = 'PATH'      then call CmdPath
   when cmd = 'SCAN'      then call CmdScan rest
   when cmd = 'RUN'       then call CmdRun rest
   when cmd = 'BUILD'     then call CmdBuild rest
@@ -138,6 +139,7 @@ CmdHelp:
   say '  token new [--label=L] | list | revoke <id>   manage your API tokens'
   say '  owner list|add|remove <pkg> [user]   manage who may publish a package'
   say '  config get|set <key> [val]  view/change REPO_URL, LIB_DIR, INTERPRETER'
+  say '  path                        show the library directory and how to put it on PATH'
   say '  help                        this message'
   return
 
@@ -285,6 +287,22 @@ InstallOne: procedure expose home cfg.
     seen = InstallOne(depspec, seen)
   end
   return seen
+
+CmdPath: procedure expose home cfg.
+  lib = cfg.LIB_DIR
+  say lib
+  say ''
+  say 'Installed package files are plain files in this directory. Put it on PATH once'
+  say 'and Regina (or ooRexx) finds them from any script, without rxpip run:'
+  say ''
+  if IsWindows() then do
+    wl = translate(lib, '\', '/')
+    say '  setx PATH "%PATH%;' || wl || '"'
+  end
+  else do
+    say '  export PATH="$PATH:' || lib || '"      (add to ~/.profile)'
+  end
+  return
 
 CmdUninstall: procedure expose home
   parse arg name '01'x .
