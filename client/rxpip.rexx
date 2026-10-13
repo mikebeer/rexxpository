@@ -460,7 +460,7 @@ CmdRun: procedure expose home cfg.
   call DelFile merged
   exit runrc
 
-CmdBuild: procedure expose home
+CmdBuild: procedure expose home cfg.
   parse arg args
   parse var args fn '01'x .
   if fn = '' | \FileExists(fn) then do
