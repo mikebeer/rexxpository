@@ -96,6 +96,8 @@ module.exports = function (D) {
     'Add that folder to your `PATH`, open a new command prompt and run `rxpip help`.',
   ]);
   D.p('`rxpip.bat` contains a single command, `regina -a "%~dp0rxpip.rexx" %*`, which finds the REXX file next to itself.');
+  D.p('To run `rxpip` from any folder, add its folder to the `PATH` permanently: `setx PATH "%PATH%;C:\\rxpip"` (then open a new command prompt). Until then, call it by its full path, for example `C:\\rxpip\\rxpip publish my.rxpkg ...`; package files may live anywhere.');
+  D.p('Package files may have any extension: `.rexx`, `.rex` or others. `rxpip run` and `build` merge every file of the installed packages, whatever it is called.');
   D.h2('The other clients');
   D.p('**ooRexx.** Needs ooRexx 5 (`rexx`) and the same curl and tar. Use the launcher `client/oorexx/rxpip-oorexx` (Linux, macOS) or `rxpip-oorexx.bat` (Windows); it passes the arguments in a form the shared client can split again, because ooRexx hands over the command line as one string. The classic packages you install are the same ones the Regina client uses.');
   D.p('**NetRexx.** Needs Java 8 or later and `NetRexxC.jar` from the NetRexx distribution. Set `NETREXX_JAR` to its path (or put the jar next to the launcher) and run `client/netrexx/rxpip-netrexx` or `rxpip-netrexx.bat`. The launcher compiles `Rxpip.nrx` the first time it runs.');

@@ -234,7 +234,7 @@ InstallOne: procedure expose home cfg.
   call EnsureDir pkgdir
   'tar xzf "' || cachefile || '" -C "' || pkgdir || '" 2>' || NullSink()
 
-  /* flatten: copy every *.rexx file into the shared lib/ dir so that
+  /* flatten: copy every package file (any extension: .rexx, .rex, ...) into the shared lib/ dir so that
      unqualified CALLs resolve for `rxpip run` */
   call EnsureDir home || '/lib'
   do i = 1 to words(files)
@@ -491,12 +491,12 @@ MergeScript: procedure
   parse arg srcfile, home, outfile
   if IsWindows() then do
     wsrc = translate(srcfile,'\','/')
-    wlib = translate(home,'\','/') || '\lib\*.rexx'
+    wlib = translate(home,'\','/') || '\lib\*'
     wout = translate(outfile,'\','/')
     '(type "' || wsrc || '" & echo. & echo exit & type "' || wlib || '" 2>nul) > "' || wout || '"'
   end
   else do
-    '(cat "' || srcfile || '"; echo; echo "exit"; cat "' || home || '/lib/"*.rexx 2>/dev/null) > "' || outfile || '"'
+    '(cat "' || srcfile || '"; echo; echo "exit"; cat "' || home || '/lib/"* 2>/dev/null) > "' || outfile || '"'
   end
   return
 

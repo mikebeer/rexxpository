@@ -42,7 +42,7 @@ make_fixtures() {  # $1 = client name ; creates $WORK/fx_$1/{lib1.rxpkg,lib2.rxp
   local c=$1 d=$WORK/fx_$1; mkdir -p "$d"
   case $c in
     regina|oorexx)
-      printf '/* lib1 */\nTwice: procedure\n  parse arg n\n  return n * 2\n' > "$d/lib1.rexx"
+      printf '/* lib1 */\nTwice: procedure\n  parse arg n\n  return n * 2\n' > "$d/lib1.rex"   # .rex: Windows users often have this extension
       printf '/* lib2 */\nThrice: procedure\n  parse arg n\n  return n * 3\n' > "$d/lib2.rexx"
       printf '/* REQUIRE m1%s */\nsay "result" Twice(21)\n' "$c" > "$d/prog.rexx"
       printf '/* args */\ndo i = 1 to arg()\n  say "arg" i "= [" || arg(i) || "]"\nend\n/* REQUIRE m1%s */\n' "$c" > "$d/argp.rexx"
@@ -59,7 +59,7 @@ make_fixtures() {  # $1 = client name ; creates $WORK/fx_$1/{lib1.rxpkg,lib2.rxp
       PROG=$d/prog.crexx; ARGP=$d/prog.crexx; WANT_RUN="result 42" ;;
   esac
   ( cd "$d" && case $c in
-      regina|oorexx) tar czf lib1.rxpkg lib1.rexx; tar czf lib2.rxpkg lib2.rexx ;;
+      regina|oorexx) tar czf lib1.rxpkg lib1.rex; tar czf lib2.rxpkg lib2.rexx ;;
       netrexx) tar czf lib1.rxpkg Lib1Nx.nrx; tar czf lib2.rxpkg Lib2Nx.nrx ;;
       crexx) tar czf lib1.rxpkg lib1cx.crexx; tar czf lib2.rxpkg lib2cx.crexx ;;
     esac )
