@@ -138,6 +138,14 @@ module.exports = function (D) {
   D.p('Once a day, when you use `install`, `search`, `show` or `run`, the client also looks for a newer release and prints one line on the error output if there is one: `rxpip: version 1.3.0 is available (you have 1.2.0). Run: rxpip update`. (The cREXX client prints it on the normal output and not before `run`.) If the repository has declared a minimum version and yours is older, the message says that your client is too old. Two settings control this: `rxpip config set CLIENT_CHECK off` switches the daily look off (the environment variable `RXPIP_NO_UPDATE_CHECK=1` does so for one run), and `rxpip config set AUTOUPDATE 1` installs a newer release at once instead of only announcing it.');
   D.note('Self-update replaces program files, so it is carried out only over HTTPS (or against a server on the same computer). A repository that you reach over plain HTTP is never used to update the client.');
 
+  D.h2('RXPIP on VM/370plus (CMS)');
+  D.p('VM/370plus has no directories, file names of at most 8+8 characters, and keeps settings with GLOBALV instead of in files. RXPIP covers this system in two ways.');
+  D.bullets([
+    '**Through a bridge (works today).** The VM/370plus kit contains `RXPIP EXEC`, which sends requests as spool files to a Linux guest. There the Regina client runs against the repository and sends the answer back. From CMS you use `RXPIP SEARCH`, `SHOW`, `AVAIL`, `BUILD` and `GET`. `GET` installs into the shared store on the Linux side and returns the source files; `BUILD` returns a program that has all its `/* REQUIRE */` packages merged in, ready to run under BREXX or cREXX on CMS. The bridge belongs to the VM/370plus project, not to this kit. Its client is updated like any other (`rxpip update` on the Linux guest, or `git pull`), and it should have `RXPIP_NO_UPDATE_CHECK=1` set so that the daily hint does not appear in CMS output.',
+    '**Natively on CMS (prepared, not working yet).** The Regina client is written so that all access to installed packages goes through a few storage routines. A CMS variant of these routines keeps the installed-package records in GLOBALV and copies files between minidisks instead of directories; the client uses it when it runs on CMS. Only a skeleton exists, and it has never been run on a real system. It needs a TCP/IP client on CMS, or a service machine that speaks the RXPIP protocol, to reach the repository.',
+  ]);
+  D.p('Packages meant for CMS must keep to the 8-character name limit for their files. Private packages work through the bridge when the bridge has a token (a dedicated user that is a reader of those packages).');
+
   // ------------------------------------------------------------ Chapter 3
   D.chapter('Using Packages');
   D.h2('Finding packages');
@@ -680,6 +688,7 @@ module.exports = function (D) {
   ]);
   D.h2('Known limitations');
   D.bullets([
+    '**CMS.** The native CMS storage backend (GLOBALV records, minidisk copies) is only a skeleton and untested; use the bridge in the VM/370plus kit.',
     '**Bytecode artifacts** are accepted and stored, and the client prefers an exact platform match, but no tool yet produces them.',
     '**Few web forms.** Requesting an account is possible in the browser; publishing, owner management and token handling are available only through the client.',
     '**No removal.** There is no command to delete or withdraw a published version; the operator must remove files by hand. Releases are meant to be immutable.',
