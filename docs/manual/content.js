@@ -25,6 +25,7 @@ module.exports = function (D) {
   D.h3('Summary of changes');
   D.p('This edition is kept up to date as RXPIP grows; each change is listed here, newest first.');
   D.bullets([
+    '**20 October 2026.** A download page for the clients on the website (`?action=DOWNLOADS`); client releases include the launchers; `tools/publish-clients.sh` publishes all four kinds; updated launchers stay executable.',
     '**13 October 2026 (third edition).** Per-package private visibility and a closed-repository mode; install into the current directory with per-directory records, `rxpip find`, `--global` and `--target`; client version checking and self-update (`rxpip update`); usage statistics and an administrator role (`rxpip admin ...`).',
     '**12 October 2026 (second edition).** Clients for ooRexx, NetRexx and cREXX in addition to Regina (artifact platforms `any`, `netrexx`, `crexx`); moderated sign-up through the web interface, with an approval mail to the administrator; a test matrix that runs one scenario against every client.',
     '**12 October 2026 (first edition).** First edition. Covers the server and client as they stand after the hardening work of early October: header-only tokens, invitation-only accounts, per-package owner lists, upload limits, archive checks, the read-only web interface, and `>=` version requirements in `REQUIRE` lines.',
@@ -75,6 +76,8 @@ module.exports = function (D) {
 
   // ------------------------------------------------------------ Chapter 2
   D.chapter('Installing the Client');
+  D.h2('Downloading the client');
+  D.p('The repository’s web page has a **Get the rxpip client** page (the link “get the client” at the top of every page, or `?action=DOWNLOADS`). It lists the newest release of each client, Regina, ooRexx, NetRexx and cREXX, with the files to download: the client itself and its launchers for Linux/macOS and Windows. Save all files of one client into one folder, make the launcher executable on Linux and macOS (`chmod +x`), and run it. The page is public, even when the repository is closed. Afterwards `rxpip update` keeps the client current. If you have the source kit instead, the sections below describe the same installation from the kit.');
   D.h2('What you need');
   D.bullets([
     '**Regina REXX** 3.9 or later, with `regina -a` working. The `-a` option makes every command-line argument arrive separately; without it, an argument with spaces such as `--summary="a short text"` would be split apart.',
@@ -560,7 +563,7 @@ module.exports = function (D) {
   D.code([
     '$ rxpip admin client-publish regina --version=1.3.0 --min=1.0.0 client/rxpip.rexx',
   ], 'Publishing a client release');
-  D.p('The ooRexx client uses the same file as the Regina client but is a separate kind, so publish it a second time with `oorexx` as the kind. For NetRexx publish `client/netrexx/Rxpip.nrx`, for cREXX `client/crexx/rxpip.crexx`. `--min` names the oldest client that still works; older clients are told that they are too old. A release can never be overwritten, and the "latest" pointer only moves forward. Releases are kept in `repo/.clients/<kind>/<version>/`; back that directory up with the rest of the repository. Clients fetch them with the public action `CLIENT`, which stays open even when the repository is closed, because a client must always be able to update itself.');
+  D.p('For a full release, run `tools/publish-clients.sh` from your checkout while logged in as an administrator. It reads each client’s version from its source, stages the right files (the client and its launchers: `rxpip.rexx` and `rxpip.bat` for Regina, `rxpip.rexx` with the two ooRexx launchers for ooRexx, `Rxpip.nrx` with its launchers for NetRexx, `rxpip.crexx` with its launchers for cREXX) and publishes the four kinds; `--min=<version>` sets the oldest working client, and kind names after it limit the run. The new releases appear on the download page at once. By hand: the ooRexx client uses the same `rxpip.rexx` as the Regina client but is a separate kind, so publish it a second time with `oorexx` as the kind. For NetRexx publish `client/netrexx/Rxpip.nrx`, for cREXX `client/crexx/rxpip.crexx`. `--min` names the oldest client that still works; older clients are told that they are too old. A release can never be overwritten, and the "latest" pointer only moves forward. Releases are kept in `repo/.clients/<kind>/<version>/`; back that directory up with the rest of the repository. Clients fetch them with the public action `CLIENT`, which stays open even when the repository is closed, because a client must always be able to update itself.');
 
   // ------------------------------------------------------------ Chapter 9
   D.chapter('Protocol Reference');
@@ -592,6 +595,7 @@ module.exports = function (D) {
     ['`DOWNLOAD`', 'GET', '`name`, `version`, `kind`, `platform`', 'The archive (defaults: latest, `SOURCE`, `any`)'],
     ['`OWNERS`', 'GET', '`name`', 'Space-separated owner list'],
     ['`REGISTER`', 'POST', 'headers `X-Rxpip-Invite`, `X-Rxpip-User`', 'New user and first token'],
+    ['`DOWNLOADS`', 'GET', '—', 'HTML page listing the newest release of each client with download links'],
     ['`CLIENT`', 'GET', '`kind`, `version`, `file`', 'Without `file`: the manifest of a client release (`VERSION`, `LATEST`, `MIN`, `FILES`); with `file`: that file. Also open in a closed repository'],
   ], [1500, 900, 3400, 3838], 'Actions that need no token');
   D.h2('Actions that need a token');

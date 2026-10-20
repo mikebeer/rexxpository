@@ -92,11 +92,12 @@ clen      = value('CONTENT_LENGTH',,'ENVIRONMENT')
 if clen = '' then clen = 0
 
 action = translate(QGet(qstring, 'ACTION'))
-if action \= 'PING' & action \= '' & action \= 'HOME' & action \= 'PKG' & action \= 'SIGNUP' & action \= 'REVIEW' then call LogEvent REPO_ROOT || '/.stats', 'REQ', lower(action)
+if action \= 'PING' & action \= 'DOWNLOADS' & action \= '' & action \= 'HOME' & action \= 'PKG' & action \= 'SIGNUP' & action \= 'REVIEW' then call LogEvent REPO_ROOT || '/.stats', 'REQ', lower(action)
 
 select
   when action = '' | action = 'HOME' then call Web_Home REPO_ROOT, AUTH_DIR, qstring
   when action = 'PKG'      then call Web_Package REPO_ROOT, AUTH_DIR, qstring
+  when action = 'DOWNLOADS' then call Web_Downloads REPO_ROOT, qstring
   when action = 'SIGNUP'   then call Web_Signup AUTH_DIR, method_, clen
   when action = 'REVIEW'   then call Web_Review AUTH_DIR, method_, clen, qstring
   when action = 'PING'     then call Action_Ping
@@ -787,7 +788,7 @@ HtmlHeader: procedure
   say 'form.f{display:block} form.f label{display:block;margin:.8rem 0 .2rem} form.f input[type=text],form.f input[type=email]{width:100%;box-sizing:border-box;padding:.55rem .7rem;font-size:1rem;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)} .hp{display:none}'
   say '.tbl{overflow-x:auto} footer{color:var(--mute);font-size:.85rem;margin-top:3rem}'
   say '</style></head><body>'
-  say '<header><div><a href="' || Esc(value('SCRIPT_NAME',,'ENVIRONMENT')) || '">rexxpository</a> <span class="mute">&middot; the REXX package index</span></div></header>'
+  say '<header><div><a href="' || Esc(value('SCRIPT_NAME',,'ENVIRONMENT')) || '">rexxpository</a> <span class="mute">&middot; the REXX package index &middot; <a href="' || Esc(value('SCRIPT_NAME',,'ENVIRONMENT')) || '?action=DOWNLOADS" style="font-weight:400;font-size:1rem">get the client</a></span></div></header>'
   say '<main>'
   return
 
@@ -836,6 +837,55 @@ Web_Home: procedure
     say '<div class="tbl"><table><thead><tr><th>Name</th><th>Latest</th><th>Summary</th><th>Owners</th></tr></thead><tbody>'
     call charout , rows
     say '</tbody></table></div>'
+  end
+  call HtmlFooter
+  return
+
+/* ---- the client download page (public; also in a closed repository) ------ */
+Web_Downloads: procedure
+  parse arg root, qstring
+  self = Esc(value('SCRIPT_NAME',,'ENVIRONMENT'))
+  call HtmlHeader 200, 'Get the rxpip client'
+  say '<h1>Get the rxpip client</h1>'
+  say '<p>rxpip installs packages from this repository. Pick the client for your REXX interpreter; all four behave the same and share the same repository. Every client needs <code>curl</code> and <code>tar</code> (both are part of current Windows, macOS and Linux).</p>'
+  kinds = 'regina oorexx netrexx crexx'
+  title.1 = 'Regina REXX'
+  title.2 = 'ooRexx'
+  title.3 = 'NetRexx'
+  title.4 = 'cREXX'
+  need.1 = 'Regina 3.9 or newer.'
+  need.2 = 'ooRexx 5 or newer. Shares the package store with the Regina client.'
+  need.3 = 'Java and <code>NetRexxC.jar</code> (set <code>NETREXX_JAR</code> to its path).'
+  need.4 = 'cREXX 1.0 beta 3 or newer, with <code>rxc</code>, <code>rxas</code> and <code>rxvm</code> on the PATH (or <code>CREXX_HOME</code> set).'
+  how.1 = 'Save the files into a folder on your PATH. On Linux and macOS run <code>chmod +x rxpip.rexx</code> and call it as <code>rxpip.rexx</code> (or <code>regina -a rxpip.rexx</code>); on Windows use <code>rxpip.bat</code>.'
+  how.2 = 'Save all files into one folder on your PATH. On Linux and macOS run <code>chmod +x rxpip-oorexx</code>; on Windows use <code>rxpip-oorexx.bat</code>.'
+  how.3 = 'Save all files into one folder. On Linux and macOS run <code>chmod +x rxpip-netrexx</code>; on Windows use <code>rxpip-netrexx.bat</code>. The client is compiled the first time you start it.'
+  how.4 = 'Save all files into one folder. On Linux and macOS run <code>chmod +x rxpip-crexx</code>; on Windows use <code>rxpip-crexx.bat</code>. The client is compiled the first time you start it.'
+  any = 0
+  do i = 1 to words(kinds)
+    kind = word(kinds, i)
+    ver = ClientLatest(root, kind)
+    if ver = '' | \IsSafeVersion(ver) | \FileExists(root || '/.clients/' || kind || '/' || ver || '/MANIFEST') then iterate
+    any = 1
+    dir = root || '/.clients/' || kind || '/' || ver
+    files = FileField(dir || '/MANIFEST', 'FILES')
+    say '<h2>' || title.i || ' <span class="mute">version ' || Esc(ver) || '</span></h2>'
+    say '<p>' || need.i || '</p>'
+    say '<div class="tbl"><table><thead><tr><th>File</th><th>Size</th></tr></thead><tbody>'
+    do j = 1 to words(files)
+      f = word(files, j)
+      if \IsSafeFileName(f) then iterate
+      sz = stream(dir || '/' || f, 'c', 'query size')
+      say '<tr><td><a href="' || self || '?action=CLIENT&amp;kind=' || kind || '&amp;version=' || Esc(ver) || '&amp;file=' || Esc(f) || '">' || Esc(f) || '</a></td><td class="mute">' || sz || ' bytes</td></tr>'
+    end
+    say '</tbody></table></div>'
+    say '<p>' || how.i || '</p>'
+  end
+  if \any then say '<p>No client has been published here yet.</p>'
+  else do
+    say '<h2>Then</h2>'
+    say '<pre>rxpip search &lt;term&gt;' || '0a'x || 'rxpip install &lt;name&gt;' || '0a'x || 'rxpip update --check</pre>'
+    say '<p class="mute">Once installed, <code>rxpip update</code> fetches newer releases of your client from here. The client sends its kind, version and operating system with each request; see the manual for what the server records.</p>'
   end
   call HtmlFooter
   return
@@ -1900,6 +1950,8 @@ Action_Client: procedure
   path = dir || '/' || file
   sz = stream(path, 'c', 'query size')
   say 'Content-Type: application/octet-stream'
+  say 'Content-Disposition: attachment; filename="' || file || '"'
+  say 'X-Content-Type-Options: nosniff'
   say 'Content-Length:' sz
   say ''
   data = charin(path, 1, sz)

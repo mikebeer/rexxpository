@@ -271,7 +271,9 @@ Client releases live in `repo/.clients/<kind>/<version>/` (kinds: `regina`,
 checkout, e.g. `rxpip admin client-publish regina --version=1.3.0 --min=1.0.0
 client/rxpip.rexx` (and again with `oorexx`; `client/netrexx/Rxpip.nrx` for
 `netrexx`, `client/crexx/rxpip.crexx` for `crexx`). The public action `CLIENT`
-serves them, also in a closed repository. Remember to raise `ClientVersion` in
+serves them, also in a closed repository. `tools/publish-clients.sh [--min=V]` does all four kinds at once (version taken from
+each client's `ClientVersion`, launchers included); the releases are listed on the public
+page `?action=DOWNLOADS` (linked as "get the client" on every page). Remember to raise `ClientVersion` in
 the client source before releasing. Back up `.stats/` and `.clients/` with the rest of `repo/`.
 
 ## 9. Header forwarding

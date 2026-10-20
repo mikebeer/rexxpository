@@ -1390,6 +1390,7 @@ DoUpdate: procedure expose home cfg.
   do i = 1 to words(files)
     f = word(files, i)
     call MoveFile dir || '/' || f || '.new', dir || '/' || f
+    if \IsWindows() then 'chmod 755 "' || dir || '/' || f || '"'   /* launchers and the shebang script stay executable */
   end
   call StampCheck home, latest, ''
   say 'rxpip: updated to' latest

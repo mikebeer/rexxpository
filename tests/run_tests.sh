@@ -221,7 +221,7 @@ expect "package page: requires is linked" "$pk" "action=PKG&amp;name=mathutils"
 expect "package page: points to the newer version" "$pk" "View 1.3.0"
 expect "package page: download link" "$pk" "action=DOWNLOAD&amp;name=webpkg&amp;version=1.2.0&amp;kind=SOURCE&amp;platform=any"
 expect "package page: version list" "$pk" "version=1.3.0"
-dl=$(printf '%s' "$pk" | grep -o 'href="[^"]*action=DOWNLOAD[^"]*"' | head -1 | sed 's/^href="//; s/"$//; s/&amp;/\&/g')
+dl=$(printf '%s' "$pk" | grep -o 'href="[^"]*action=DOWNLOAD&amp;[^"]*"' | head -1 | sed 's/^href="//; s/"$//; s/&amp;/\&/g')
 curl -s -o "$WORK/webdl.rxpkg" "http://127.0.0.1:$PORT$dl"
 cmp -s "$WORK/webdl.rxpkg" "$WORK/strutils.rxpkg" && ok "the download link on the page serves the artifact" || bad "the download link on the page serves the artifact" "link=$dl"
 expect "latest version is the default" "$(H "$BASE?action=PKG&name=webpkg")" "<h1>webpkg <span class=\"mute\">1.3.0"
@@ -588,6 +588,27 @@ expect "old clients are starred in the report" "$(curl -s -X POST -H "X-Rxpip-To
 expect "locking revokes a user's tokens" "$(curl -s -X POST -H "X-Rxpip-Token: $TOKA" -H "X-Rxpip-User: bob" "$BASE?action=ADMINLOCK")" "REVOKED: 1"
 expect "the locked user's token is dead" "$(curl -s -X POST -H "X-Rxpip-Token: $TOKB" "$BASE?action=WHOAMI")" "BAD_TOKEN"
 TOKB=$(adm newtoken bob | sed 's/.*: //')
+# ---- the download page and the release script ----
+D=$(curl -s "$BASE?action=DOWNLOADS")
+expect "download page names the Regina client" "$D" "Regina REXX"
+expect "download page shows the version" "$D" "version 1.1.0"
+expect "download page links the files" "$D" "action=CLIENT&amp;kind=regina&amp;version=1.1.0&amp;file=rxpip.rexx"
+expect_not "kinds without a release are not listed" "$D" "NetRexx"
+expect "the home page links to the downloads" "$(curl -s "$BASE")" "action=DOWNLOADS"
+expect_not "the download page is not logged" "$(grep -c '|REQ|downloads|' "$REPO"/.stats/*.log | paste -sd+ | bc)" "1"
+hd=$(curl -s -D - -o /dev/null "$BASE?action=CLIENT&kind=regina&file=rxpip.rexx")
+expect "client files are sent as attachments" "$hd" 'attachment; filename="rxpip.rexx"'
+export RXPIP_HOME=$WORK/relhome; mkdir -p "$RXPIP_HOME"
+regina -a "$ROOT/client/rxpip.rexx" config set REPO_URL "$BASE" >/dev/null
+regina -a "$ROOT/client/rxpip.rexx" login --token="$TOKA" >/dev/null
+rel=$(RXPIP="regina -a $ROOT/client/rxpip.rexx" "$ROOT/tools/publish-clients.sh" regina oorexx netrexx crexx 2>&1)
+unset RXPIP_HOME
+expect "the release script publishes all four kinds" "$rel" "== crexx"
+expect "it reads the version from the source" "$rel" "== regina 1."
+D=$(curl -s "$BASE?action=DOWNLOADS")
+expect "now all four clients are listed" "$D" "cREXX"
+expect "launchers are offered too" "$D" "rxpip-oorexx.bat"
+expect "ooRexx launcher is in the release" "$(curl -s "$BASE?action=CLIENT&kind=oorexx")" "rxpip-oorexx"
 adm rmadmin alice >/dev/null
 expect "removed administrators are refused again" "$(curl -s -X POST -H "X-Rxpip-Token: $TOKA" "$BASE?action=ADMINSTATS")" "FORBIDDEN"
 adm addadmin alice >/dev/null
@@ -614,7 +635,8 @@ expect "a garbage token is refused" "$(cg "rxp_00000000_000000000000000000000000
 expect "web home says the repository is private" "$(curl -s "$CBASE")" "Private repository"
 expect_not "web home lists nothing" "$(curl -s "$CBASE")" "mathutils"
 expect "sign-up stays reachable" "$(curl -s "$CBASE?action=SIGNUP")" "<form"
-expect "client releases stay public" "$(curl -s "$CBASE?action=CLIENT&kind=regina")" "VERSION: 1.1.0"
+expect "client releases stay public" "$(curl -s "$CBASE?action=CLIENT&kind=regina")" "KIND: regina"
+expect "the download page stays public" "$(curl -s "$CBASE?action=DOWNLOADS")" "Get the rxpip client"
 kill $CPID 2>/dev/null
 
 # ============================================================================

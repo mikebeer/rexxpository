@@ -955,6 +955,7 @@ class Rxpip
     loop i = 1 to flist.words
       f = flist.word(i)
       Files.move(File((dir'/'f'.new').toString).toPath(), File((dir'/'f).toString).toPath(), replaceOpt())
+      File((dir'/'f).toString).setExecutable(1)   -- launchers
     end
     deletePath(home'/netrexx/bin/Rxpip.class')   -- the launcher recompiles the new source
     stampCheck(latest, '')

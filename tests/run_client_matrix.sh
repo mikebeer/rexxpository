@@ -192,6 +192,7 @@ run_client() {
   out=$($RX2 update 2>&1);                      expect "update installs the new release" "$out" "updated to 99.0.0"
   grep -q UPDATED-MARK "$relsrc" && ok "the client file was replaced" || bad "the client file was replaced" "$(tail -2 "$relsrc")"
   [ -f "$relsrc.new" ] && bad "no temporary file left behind" "$relsrc.new" || ok "no temporary file left behind"
+  [ -x "$relsrc" ] && ok "updated files stay executable" || bad "updated files stay executable" "$(ls -l "$relsrc")"
   out=$($RX admin lock nobody 2>&1);            expect "admin lock of an unknown user" "$out" "NO_SUCH_USER"
   $RX logout >/dev/null 2>&1
   out=$($RX whoami 2>&1);                       expect "whoami after logout" "$out" "not logged in"

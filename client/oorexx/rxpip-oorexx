@@ -3,7 +3,10 @@
 # with the Regina client: same ~/.rxpip store, same credentials.
 # ooRexx passes the command line as ONE string, so every argument is
 # double-quoted here and split again inside rxpip.rexx.
-D=$(cd "$(dirname "$0")/.." && pwd)
+# rxpip.rexx is either next to this launcher (downloaded from the website)
+# or one level up (the repository layout)
+D=$(cd "$(dirname "$0")" && pwd)
+[ -f "$D/rxpip.rexx" ] || D=$(cd "$D/.." && pwd)
 q=""
 for a in "$@"; do
   e=$(printf '%s' "$a" | sed 's/\\/\\\\/g; s/"/\\"/g')

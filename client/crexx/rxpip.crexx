@@ -1117,6 +1117,13 @@ doUpdate: procedure = .int
     nf = dir || '/' || f || '.new'
     tf = dir || '/' || f
     address crexx "mv :nf :tf" output ao error ae
+    do                                               /* launchers stay executable */
+      cmv = .string[]
+      cmv[1] = 'chmod'
+      cmv[2] = '755'
+      cmv[3] = tf
+      x = exec(cmv)
+    end
   end
   call rmfile(home || '/crexx/bin/rxpip.rxbin')   /* the launcher recompiles the new source */
   call stampCheck(latest, '')
