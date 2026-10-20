@@ -591,6 +591,10 @@ TOKB=$(adm newtoken bob | sed 's/.*: //')
 # ---- the download page and the release script ----
 D=$(curl -s "$BASE?action=DOWNLOADS")
 expect "download page names the Regina client" "$D" "Regina REXX"
+expect "download page has a Windows section" "$D" "<h3>Windows</h3>"
+expect "download page has a Linux section" "$D" "<h3>Linux</h3>"
+expect "download page has a macOS section" "$D" "<h3>macOS</h3>"
+expect "and a ready curl command" "$D" "curl.exe -o rxpip.bat"
 expect "download page shows the version" "$D" "version 1.1.0"
 expect "download page links the files" "$D" "action=CLIENT&amp;kind=regina&amp;version=1.1.0&amp;file=rxpip.rexx"
 expect_not "kinds without a release are not listed" "$D" "NetRexx"

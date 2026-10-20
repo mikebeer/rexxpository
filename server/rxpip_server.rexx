@@ -847,7 +847,25 @@ Web_Downloads: procedure
   self = Esc(value('SCRIPT_NAME',,'ENVIRONMENT'))
   call HtmlHeader 200, 'Get the rxpip client'
   say '<h1>Get the rxpip client</h1>'
-  say '<p>rxpip installs packages from this repository. Pick the client for your REXX interpreter; all four behave the same and share the same repository. Every client needs <code>curl</code> and <code>tar</code> (both are part of current Windows, macOS and Linux).</p>'
+  say '<p>rxpip installs REXX packages from this repository. Below are the downloads for Windows, Linux and macOS, then the clients for the other REXX interpreters; all behave the same.</p>'
+  rv = ClientLatest(root, 'regina')
+  if rv \= '' & IsSafeVersion(rv) & FileExists(root || '/.clients/regina/' || rv || '/MANIFEST') then do
+    base = Esc(PublicUrl()) || '?action=CLIENT&amp;kind=regina&amp;version=' || Esc(rv) || '&amp;file='
+    nl = '0a'x
+    say '<h2>Download for your system</h2>'
+    say '<p>The standard client runs on <a href="https://regina-rexx.sourceforge.io/">Regina REXX</a> (version ' || Esc(rv) || ').</p>'
+    say '<h3>Windows</h3>'
+    say '<p>Install Regina for Windows, then save these two files into one folder that is on your PATH: <a href="' || self || '?action=CLIENT&amp;kind=regina&amp;version=' || Esc(rv) || '&amp;file=rxpip.rexx">rxpip.rexx</a> and <a href="' || self || '?action=CLIENT&amp;kind=regina&amp;version=' || Esc(rv) || '&amp;file=rxpip.bat">rxpip.bat</a>. Or in a command prompt:</p>'
+    say '<pre>curl.exe -o rxpip.rexx "' || base || 'rxpip.rexx"' || nl || 'curl.exe -o rxpip.bat "' || base || 'rxpip.bat"</pre>'
+    say '<h3>Linux</h3>'
+    say '<p>Install Regina (<code>sudo apt install regina-rexx</code> or <code>sudo dnf install regina-rexx</code>), then:</p>'
+    say '<pre>sudo curl -o /usr/local/bin/rxpip.rexx "' || base || 'rxpip.rexx"' || nl || 'sudo chmod +x /usr/local/bin/rxpip.rexx' || nl || 'sudo ln -sf rxpip.rexx /usr/local/bin/rxpip' || nl || 'rxpip help</pre>'
+    say '<h3>macOS</h3>'
+    say '<p>Install Regina (<code>brew install regina-rexx</code>), then:</p>'
+    say '<pre>sudo curl -o /usr/local/bin/rxpip.rexx "' || base || 'rxpip.rexx"' || nl || 'sudo chmod +x /usr/local/bin/rxpip.rexx' || nl || 'sudo ln -sf rxpip.rexx /usr/local/bin/rxpip' || nl || 'rxpip help</pre>'
+    say '<p class="mute">All three need <code>curl</code> and <code>tar</code>, which Windows 10 and later, macOS and Linux include. Later, <code>rxpip update</code> installs newer versions of the client.</p>'
+    say '<h2>Other REXX interpreters</h2>'
+  end
   kinds = 'regina oorexx netrexx crexx'
   title.1 = 'Regina REXX'
   title.2 = 'ooRexx'
