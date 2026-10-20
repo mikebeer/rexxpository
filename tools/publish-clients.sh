@@ -3,6 +3,8 @@
 # kind (regina, oorexx, netrexx, crexx), reading each version from the
 # source's own ClientVersion. Run from a checkout, logged in as an
 # administrator:   tools/publish-clients.sh [--min=1.0.0] [kind...]
+# Every file is signed with minisign first when it is installed (key:
+# $MINISIGN_KEY or ~/.minisign/minisign.key; NOSIGN=1 skips signing).
 # RXPIP: command to run the client (default: regina -a client/rxpip.rexx)
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 RXPIP=${RXPIP:-regina -a $ROOT/client/rxpip.rexx}
@@ -25,6 +27,12 @@ for k in $KINDS; do
   v=$(version_of "$src")
   [ -n "$v" ] || { echo "$k: cannot read the version from $src"; rc=1; rm -rf "$S"; continue; }
   echo "== $k $v"
+  if [ -z "$NOSIGN" ] && command -v minisign >/dev/null 2>&1; then
+    KEY=${MINISIGN_KEY:-$HOME/.minisign/minisign.key}
+    minisign -S -s "$KEY" -m "$S"/* || { echo "$k: signing failed"; rc=1; rm -rf "$S"; continue; }
+  else
+    echo "$k: not signed (minisign not found or NOSIGN set)"
+  fi
   $RXPIP admin client-publish "$k" --version="$v" $MIN "$S"/* || rc=1
   rm -rf "$S"
 done

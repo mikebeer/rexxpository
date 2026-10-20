@@ -841,6 +841,13 @@ Web_Home: procedure
   call HtmlFooter
   return
 
+/* the minisign public key that signs the client releases (public; also
+   built into the clients, and in client/minisign.pub) */
+MinisignKey: procedure
+  k = value('RXPIP_MINISIGN_KEY',,'ENVIRONMENT')
+  if k = '' then k = 'RWTwuk9ZuGM56RANzR4KRqK6p6VEGsdcFyB6+vTeRmrlWFWZouyOjcYY'
+  return k
+
 /* ---- the client download page (public; also in a closed repository) ------ */
 Web_Downloads: procedure
   parse arg root, qstring
@@ -889,6 +896,7 @@ Web_Downloads: procedure
   how.3 = 'Save all files into one folder. On Linux and macOS run <code>chmod +x rxpip-netrexx</code>; on Windows use <code>rxpip-netrexx.bat</code>. The client is compiled the first time you start it.'
   how.4 = 'Save all files into one folder. On Linux and macOS run <code>chmod +x rxpip-crexx</code>; on Windows use <code>rxpip-crexx.bat</code>. The client is compiled the first time you start it.'
   any = 0
+  anysig = 0
   do i = 1 to words(kinds)
     kind = word(kinds, i)
     ver = ClientLatest(root, kind)
@@ -898,18 +906,31 @@ Web_Downloads: procedure
     files = FileField(dir || '/MANIFEST', 'FILES')
     say '<h2>' || title.i || ' <span class="mute">version ' || Esc(ver) || '</span></h2>'
     say '<p>' || need.i || '</p>'
-    say '<div class="tbl"><table><thead><tr><th>File</th><th>Size</th><th>SHA-256</th></tr></thead><tbody>'
+    say '<div class="tbl"><table><thead><tr><th>File</th><th>Size</th><th>SHA-256</th><th>Signature</th></tr></thead><tbody>'
     do j = 1 to words(files)
       f = word(files, j)
-      if \IsSafeFileName(f) then iterate
+      if \IsSafeFileName(f) | right(f, 8) = '.minisig' then iterate
+      sg = ''
+      if wordpos(f || '.minisig', files) > 0 then do
+        sg = '<a href="' || self || '?action=CLIENT&amp;kind=' || kind || '&amp;version=' || Esc(ver) || '&amp;file=' || Esc(f) || '.minisig">' || Esc(f) || '.minisig</a>'
+        anysig = 1
+      end
       sz = stream(dir || '/' || f, 'c', 'query size')
-      say '<tr><td><a href="' || self || '?action=CLIENT&amp;kind=' || kind || '&amp;version=' || Esc(ver) || '&amp;file=' || Esc(f) || '">' || Esc(f) || '</a></td><td class="mute">' || sz || ' bytes</td><td class="mute"><code style="font-size:.75rem;word-break:break-all">' || Esc(FileField(dir || '/MANIFEST', 'SHA256-' || f)) || '</code></td></tr>'
+      say '<tr><td><a href="' || self || '?action=CLIENT&amp;kind=' || kind || '&amp;version=' || Esc(ver) || '&amp;file=' || Esc(f) || '">' || Esc(f) || '</a></td><td class="mute">' || sz || ' bytes</td><td class="mute"><code style="font-size:.75rem;word-break:break-all">' || Esc(FileField(dir || '/MANIFEST', 'SHA256-' || f)) || '</code></td><td>' || sg || '</td></tr>'
     end
     say '</tbody></table></div>'
     say '<p>' || how.i || '</p>'
   end
   if \any then say '<p>No client has been published here yet.</p>'
   else do
+    if anysig then do
+      say '<h2>Verify the signature</h2>'
+      say '<p>The release files are signed with <a href="https://jedisct1.github.io/minisign/">minisign</a>. The public key is:</p>'
+      say '<pre>' || Esc(MinisignKey()) || '</pre>'
+      say '<p>Download a file and its <code>.minisig</code> next to it, then check them. The check tells you that the file comes from the publisher of this key, even if this server were not trusted. Compare the key with the one in the project repository (<code>client/minisign.pub</code>).</p>'
+      say '<pre>minisign -V -P ' || Esc(MinisignKey()) || ' -m rxpip.rexx</pre>'
+      say '<p class="mute"><code>rxpip update</code> performs this check itself when <code>minisign</code> is installed.</p>'
+    end
     say '<h2>Then</h2>'
     say '<pre>rxpip search &lt;term&gt;' || '0a'x || 'rxpip install &lt;name&gt;' || '0a'x || 'rxpip update --check</pre>'
     say '<p class="mute">Once installed, <code>rxpip update</code> fetches newer releases of your client from here. The client sends its kind, version and operating system with each request; see the manual for what the server records.</p>'

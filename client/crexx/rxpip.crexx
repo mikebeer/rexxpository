@@ -1110,6 +1110,24 @@ doUpdate: procedure = .int
       return 1
     end
   end
+  vr = verifyRelease(dir, flist)
+  vstat = word(vr, 1)
+  vfile = word(vr, 2)
+  if vstat = 'FAIL' then say 'rxpip: the signature of ' || vfile || ' is NOT valid -- the update is refused'
+  else if vstat \= 'OK' & getConfig('REQUIRE_SIGNATURE') = '1' then do
+    if vstat = 'NOTOOL' then say 'rxpip: REQUIRE_SIGNATURE is set but minisign is not installed -- the update is refused'
+    else say 'rxpip: REQUIRE_SIGNATURE is set but this release is not (fully) signed -- the update is refused'
+    vstat = 'FAIL'
+  end
+  if vstat = 'FAIL' then do
+    do j = 1 to words(flist)
+      call rmfile(dir || '/' || word(flist, j) || '.new')
+    end
+    return 1
+  end
+  if vstat = 'NOTOOL' then say 'rxpip: note: signatures not checked (install minisign to check them)'
+  if vstat = 'UNSIGNED' then say 'rxpip: note: this release is not signed'
+  if vstat = 'OK' then say 'rxpip: signature verified'
   ao = .string[]
   ae = .string[]
   do i = 1 to words(flist)
@@ -1138,6 +1156,49 @@ readAll: procedure = .string
     res = res || rl[i] || NL
   end
   return res
+
+/* the minisign public key that signs the releases */
+signKey: procedure = .string
+  k = getenv('RXPIP_MINISIGN_KEY')
+  if k = '' then k = 'RWTwuk9ZuGM56RANzR4KRqK6p6VEGsdcFyB6+vTeRmrlWFWZouyOjcYY'
+  return k
+
+/* check the downloaded (.new) files against their .minisig: OK, UNSIGNED,
+   NOTOOL (minisign missing) or "FAIL <file>" */
+verifyRelease: procedure = .string
+  arg dir = .string, flist = .string
+  signed = 0
+  unsigned = 0
+  do i = 1 to words(flist)
+    f = word(flist, i)
+    if right(f, 8) = '.minisig' then iterate
+    if wordpos(f || '.minisig', flist) > 0 then signed = signed + 1
+    else unsigned = unsigned + 1
+  end
+  if signed = 0 then return 'UNSIGNED'
+  tv = .string[]
+  tv[1] = 'minisign'
+  tv[2] = '-v'
+  x = exec(tv)
+  if lastrc \= 0 then return 'NOTOOL'
+  do i = 1 to words(flist)
+    f = word(flist, i)
+    if right(f, 8) = '.minisig' | wordpos(f || '.minisig', flist) = 0 then iterate
+    vv = .string[]
+    vv[1] = 'minisign'
+    vv[2] = '-V'
+    vv[3] = '-q'
+    vv[4] = '-P'
+    vv[5] = signKey()
+    vv[6] = '-m'
+    vv[7] = dir || '/' || f || '.new'
+    vv[8] = '-x'
+    vv[9] = dir || '/' || f || '.minisig.new'
+    x = exec(vv)
+    if lastrc \= 0 then return 'FAIL ' || f
+  end
+  if unsigned > 0 then return 'UNSIGNED'
+  return 'OK'
 
 stampCheck: procedure = .void
   arg latest = .string, minv = .string

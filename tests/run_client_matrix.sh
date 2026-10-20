@@ -193,6 +193,27 @@ run_client() {
   grep -q UPDATED-MARK "$relsrc" && ok "the client file was replaced" || bad "the client file was replaced" "$(tail -2 "$relsrc")"
   [ -f "$relsrc.new" ] && bad "no temporary file left behind" "$relsrc.new" || ok "no temporary file left behind"
   [ -x "$relsrc" ] && ok "updated files stay executable" || bad "updated files stay executable" "$(ls -l "$relsrc")"
+  # ---- signed releases (needs the minisign program) ----
+  if command -v minisign >/dev/null 2>&1; then
+    local MK=$WORK/mk_$c; mkdir -p "$MK/r2" "$MK/r3"
+    minisign -G -W -f -p "$MK/t.pub" -s "$MK/t.key" >/dev/null 2>&1
+    export RXPIP_MINISIGN_KEY=$(sed -n 2p "$MK/t.pub")
+    cp "$relsrc" "$MK/r2/"; echo '/* SIGNED-OK */' >> "$MK/r2/$rname"
+    minisign -S -s "$MK/t.key" -m "$MK/r2/$rname" -x "$MK/r2/$rname.minisig" >/dev/null 2>&1
+    out=$($RX admin client-publish $c --version=99.1.0 "$MK/r2/$rname" "$MK/r2/$rname.minisig" 2>&1); expect "publish a signed release" "$out" "$rname.minisig"
+    out=$($RX2 update 2>&1);                    expect "a signed release is verified" "$out" "signature verified"
+    grep -q SIGNED-OK "$relsrc" && ok "the verified release was installed" || bad "the verified release was installed" "$(tail -2 "$relsrc")"
+    [ -f "$(dirname "$relsrc")/$rname.minisig" ] && ok "the signature is kept next to the file" || bad "the signature is kept next to the file"
+    cp "$relsrc" "$MK/r3/"; minisign -S -s "$MK/t.key" -m "$MK/r3/$rname" -x "$MK/r3/$rname.minisig" >/dev/null 2>&1
+    echo '/* TAMPERED */' >> "$MK/r3/$rname"
+    out=$($RX admin client-publish $c --version=99.2.0 "$MK/r3/$rname" "$MK/r3/$rname.minisig" 2>&1); expect "publish a release whose file does not match its signature" "$out" "LATEST: 99.2.0"
+    out=$($RX2 update 2>&1);                    expect "a bad signature is refused" "$out" "NOT valid"
+    grep -q TAMPERED "$relsrc" && bad "the tampered file was not installed" "installed" || ok "the tampered file was not installed"
+    [ -f "$relsrc.new" ] && bad "no temporary file left after a refused update" || ok "no temporary file left after a refused update"
+    unset RXPIP_MINISIGN_KEY
+  else
+    echo "  (minisign not installed: signed-release tests skipped)"
+  fi
   out=$($RX admin lock nobody 2>&1);            expect "admin lock of an unknown user" "$out" "NO_SUCH_USER"
   $RX logout >/dev/null 2>&1
   out=$($RX whoami 2>&1);                       expect "whoami after logout" "$out" "not logged in"

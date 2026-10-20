@@ -499,6 +499,20 @@ launcher recompiles. The client finds its own folder from `RXPIP_CLIENT_DIR`
 (stamp `clientcheck.txt`) prints a hint on stderr (cREXX: stdout, not before
 `run`).
 
+### Signed client releases
+
+A release may contain `<file>.minisig` next to `<file>` (minisign, Ed25519). The
+server just stores them as ordinary release files (they are in `FILES`) and the
+download page links them and shows the public key (`MinisignKey()`, default the
+project key, `RXPIP_MINISIGN_KEY` overrides). Trust lives in the client:
+`rxpip update` downloads everything as `.new`, then `VerifyRelease` runs
+`minisign -V -q -P <key> -m f.new -x f.minisig.new` for each signed file before any
+file is moved. Result: OK / UNSIGNED / NOTOOL (minisign missing) / FAIL (always
+refuses, deletes the `.new` files). Config `REQUIRE_SIGNATURE 1` also refuses
+UNSIGNED and NOTOOL. The key is built into all four clients and
+`RXPIP_MINISIGN_KEY` overrides it (tests, key rotation). The private key never
+touches the server.
+
 ### VM/370plus
 
 *Existing route.* mikebeer/vm370plus (`arch/31bit/linux390/rxpip`) already

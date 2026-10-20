@@ -618,6 +618,15 @@ expect "download page shows the SHA-256 of the file" "$D" "$sha"
 expect "the manifest carries the checksums" "$(curl -s "$BASE?action=CLIENT&kind=regina")" "SHA256-rxpip.rexx: $sha"
 expect "launchers are offered too" "$D" "rxpip-oorexx.bat"
 expect "ooRexx launcher is in the release" "$(curl -s "$BASE?action=CLIENT&kind=oorexx")" "rxpip-oorexx"
+# ---- signatures on the download page ----
+mkdir -p "$WORK/relsig"; echo 'say 3' > "$WORK/relsig/rxpip.rexx"; echo fakesig > "$WORK/relsig/rxpip.rexx.minisig"
+tar czf "$WORK/relsig.tgz" -C "$WORK/relsig" rxpip.rexx rxpip.rexx.minisig
+curl -s -X POST -H "X-Rxpip-Token: $TOKA" -H "X-Rxpip-Kind: regina" -H "X-Rxpip-Version: 9.8.7" --data-binary @"$WORK/relsig.tgz" "$BASE?action=ADMINCLIENT" >/dev/null
+D=$(curl -s "$BASE?action=DOWNLOADS")
+expect "the download page links the signature" "$D" "file=rxpip.rexx.minisig"
+expect "the page shows the public key" "$D" "RWTwuk9ZuGM56RANzR4KRqK6p6VEGsdcFyB6+vTeRmrlWFWZouyOjcYY"
+expect "the page shows how to verify" "$D" "minisign -V -P"
+expect_not "signature files are not listed as downloads of their own" "$D" "<tr><td><a href=\"/cgi-bin/rxpip_server.rexx?action=CLIENT&amp;kind=regina&amp;version=9.8.7&amp;file=rxpip.rexx.minisig\">"
 adm rmadmin alice >/dev/null
 expect "removed administrators are refused again" "$(curl -s -X POST -H "X-Rxpip-Token: $TOKA" "$BASE?action=ADMINSTATS")" "FORBIDDEN"
 adm addadmin alice >/dev/null

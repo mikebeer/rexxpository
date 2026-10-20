@@ -952,6 +952,24 @@ class Rxpip
         return 1
       end
     end
+    vr = verifyRelease(dir, flist)
+    vstat = vr.word(1)
+    vfile = vr.word(2)
+    if vstat = 'FAIL' then say 'rxpip: the signature of 'vfile' is NOT valid -- the update is refused'
+    else if vstat \= 'OK' & getConfig('REQUIRE_SIGNATURE') = '1' then do
+      if vstat = 'NOTOOL' then say 'rxpip: REQUIRE_SIGNATURE is set but minisign is not installed -- the update is refused'
+      else say 'rxpip: REQUIRE_SIGNATURE is set but this release is not (fully) signed -- the update is refused'
+      vstat = 'FAIL'
+    end
+    if vstat = 'FAIL' then do
+      loop j = 1 to flist.words
+        deletePath(dir'/'flist.word(j)'.new')
+      end
+      return 1
+    end
+    if vstat = 'NOTOOL' then say 'rxpip: note: signatures not checked (install minisign to check them)'
+    if vstat = 'UNSIGNED' then say 'rxpip: note: this release is not signed'
+    if vstat = 'OK' then say 'rxpip: signature verified'
     loop i = 1 to flist.words
       f = flist.word(i)
       Files.move(File((dir'/'f'.new').toString).toPath(), File((dir'/'f).toString).toPath(), replaceOpt())
@@ -961,6 +979,42 @@ class Rxpip
     stampCheck(latest, '')
     say 'rxpip: updated to 'latest
     return 0
+
+  -- the minisign public key that signs the releases
+  method signKey static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    k = env('RXPIP_MINISIGN_KEY')
+    if k = '' then k = 'RWTwuk9ZuGM56RANzR4KRqK6p6VEGsdcFyB6+vTeRmrlWFWZouyOjcYY'
+    return k
+
+  -- run a program; its exit code, or 127 when it cannot be started
+  method runRc(argv=Rexx[]) static returns int signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    do
+      exec(argv)
+      return lastRc
+    catch IOException
+      return 127
+    end
+
+  -- check the downloaded (.new) files against their .minisig: OK, UNSIGNED,
+  -- NOTOOL (minisign missing) or "FAIL <file>"
+  method verifyRelease(dir=Rexx, flist=Rexx) static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    signed = 0
+    unsigned = 0
+    loop i = 1 to flist.words
+      f = flist.word(i)
+      if f.right(8) = '.minisig' then iterate
+      if flist.wordpos(f'.minisig') > 0 then signed = signed + 1
+      else unsigned = unsigned + 1
+    end
+    if signed = 0 then return 'UNSIGNED'
+    if runRc(['minisign', '-v']) \= 0 then return 'NOTOOL'
+    loop i = 1 to flist.words
+      f = flist.word(i)
+      if f.right(8) = '.minisig' | flist.wordpos(f'.minisig') = 0 then iterate
+      if runRc(['minisign', '-V', '-q', '-P', signKey(), '-m', dir'/'f'.new', '-x', dir'/'f'.minisig.new']) \= 0 then return 'FAIL 'f
+    end
+    if unsigned > 0 then return 'UNSIGNED'
+    return 'OK'
 
   method stampCheck(latest=Rexx, minv=Rexx) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
     today = Rexx(java.time.LocalDate.now().toString).changestr('-', '')

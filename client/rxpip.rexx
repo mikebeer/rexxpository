@@ -1387,6 +1387,26 @@ DoUpdate: procedure expose home cfg.
       return 1
     end
   end
+  vr = VerifyRelease(dir, files)
+  parse var vr vstat vfile
+  req = (GetConfigValue(home, 'REQUIRE_SIGNATURE') = '1')
+  if vstat = 'FAIL' then do
+    say 'rxpip: the signature of' vfile 'is NOT valid -- the update is refused'
+  end
+  else if vstat \= 'OK' & req then do
+    if vstat = 'NOTOOL' then say 'rxpip: REQUIRE_SIGNATURE is set but minisign is not installed -- the update is refused'
+    else say 'rxpip: REQUIRE_SIGNATURE is set but this release is not (fully) signed -- the update is refused'
+    vstat = 'FAIL'
+  end
+  if vstat = 'FAIL' then do
+    do j = 1 to words(files)
+      call DelFile dir || '/' || word(files, j) || '.new'
+    end
+    return 1
+  end
+  if vstat = 'NOTOOL' then say 'rxpip: note: signatures not checked (install minisign to check them)'
+  if vstat = 'UNSIGNED' then say 'rxpip: note: this release is not signed'
+  if vstat = 'OK' then say 'rxpip: signature verified'
   do i = 1 to words(files)
     f = word(files, i)
     call MoveFile dir || '/' || f || '.new', dir || '/' || f
@@ -1395,6 +1415,37 @@ DoUpdate: procedure expose home cfg.
   call StampCheck home, latest, ''
   say 'rxpip: updated to' latest
   return 0
+
+/* the minisign public key that signs the releases */
+SignKey: procedure
+  k = value('RXPIP_MINISIGN_KEY',,'ENVIRONMENT')
+  if k = '' then k = 'RWTwuk9ZuGM56RANzR4KRqK6p6VEGsdcFyB6+vTeRmrlWFWZouyOjcYY'
+  return k
+
+/* check the downloaded (.new) files of a release against their .minisig.
+   Returns OK, UNSIGNED (a file has no signature), NOTOOL (minisign is not
+   installed) or "FAIL <file>" */
+VerifyRelease: procedure
+  parse arg dir, files
+  signed = 0
+  unsigned = 0
+  do i = 1 to words(files)
+    f = word(files, i)
+    if right(f, 8) = '.minisig' then iterate
+    if wordpos(f || '.minisig', files) > 0 then signed = signed + 1
+    else unsigned = unsigned + 1
+  end
+  if signed = 0 then return 'UNSIGNED'
+  'minisign -v >' || NullSink() || ' 2>&1'
+  if rc \= 0 then return 'NOTOOL'
+  do i = 1 to words(files)
+    f = word(files, i)
+    if right(f, 8) = '.minisig' | wordpos(f || '.minisig', files) = 0 then iterate
+    'minisign -V -q -P ' || SignKey() || ' -m "' || dir || '/' || f || '.new" -x "' || dir || '/' || f || '.minisig.new" >' || NullSink() || ' 2>&1'
+    if rc \= 0 then return 'FAIL' f
+  end
+  if unsigned > 0 then return 'UNSIGNED'
+  return 'OK'
 
 StampCheck: procedure
   parse arg home, latest, minv
