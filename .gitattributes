@@ -1,0 +1,14 @@
+# Files that run on Linux/macOS must keep LF line endings, even when
+# checked out on Windows (a CR after the #! line makes them unrunnable).
+*.rexx            text eol=lf
+*.crexx           text eol=lf
+*.nrx             text eol=lf
+*.sh              text eol=lf
+*.py              text eol=lf
+rxpip-oorexx      text eol=lf
+rxpip-netrexx     text eol=lf
+rxpip-crexx       text eol=lf
+# Windows launchers keep CRLF
+*.bat             text eol=crlf
+*.cmd             text eol=crlf
+*.docx            binary
