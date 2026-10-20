@@ -147,6 +147,8 @@ which packages are downloaded. It is **not public**: only administrators
 client releases with `rxpip admin client-publish <kind> --version=V <files>`.
 `RXPIP_NOSTATS=1` turns the recording off. See DEPLOY.md and the manual.
 
+`rxpip` also removes the Internet mark (Windows `Zone.Identifier`, macOS quarantine) from the package archives and the files it unpacks and installs, so packages with binaries, DLLs or `.so` files work without manual unblocking.
+
 ## Tests
 
 `tests/run_tests.sh` starts a CGI harness (behaves like Apache) and runs

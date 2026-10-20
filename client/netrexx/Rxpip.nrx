@@ -243,7 +243,9 @@ class Rxpip
     pkgdir = home'/'lang'/pkgs/'name'/'ver
     deleteTree(pkgdir)
     mkdirs(pkgdir)
+    unblock(cachefile)
     exec(['tar', 'xzf', cachefile, '-C', pkgdir])
+    unblock(pkgdir)
     loop i = 1 to files.words
       fn = files.word(i)
       mkdirs(tgtDir)
@@ -952,6 +954,9 @@ class Rxpip
         return 1
       end
     end
+    loop i = 1 to flist.words
+      unblock(dir'/'flist.word(i)'.new')
+    end
     vr = verifyRelease(dir, flist)
     vstat = vr.word(1)
     vfile = vr.word(2)
@@ -979,6 +984,21 @@ class Rxpip
     stampCheck(latest, '')
     say 'rxpip: updated to 'latest
     return 0
+
+  -- Remove the "downloaded from the Internet" mark (Windows Zone.Identifier,
+  -- macOS quarantine) from a file or tree that rxpip itself downloaded or
+  -- unpacked, so binaries, DLLs and .so files in a package work. Never an error.
+  method unblock(path=Rexx) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    do
+      if isWindows then do
+        wp = path.translate('\\', '/')
+        if runRc(['cmd', '/c', 'dir /s /r "'wp'" 2>nul | find ":Zone.Identifier" >nul']) = 0 then -
+          runRc(['powershell', '-NoProfile', '-NonInteractive', '-Command', "Get-ChildItem -LiteralPath '"wp"' -Recurse -Force | Unblock-File"])
+      end
+      else runRc(['sh', '-c', '[ "$(uname -s)" = Darwin ] && xattr -dr com.apple.quarantine "$1" >/dev/null 2>&1; true', 'sh', path])
+    catch Exception
+      nop
+    end
 
   -- the minisign public key that signs the releases
   method signKey static returns Rexx signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException

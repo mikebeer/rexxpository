@@ -252,12 +252,14 @@ installOne: procedure = .string
   call rmtree(pkgdir)
   call mkdirs(pkgdir)
   argv = .string[]
+  call unblock(cachefile)
   argv[1] = 'tar'
   argv[2] = 'xzf'
   argv[3] = cachefile
   argv[4] = '-C'
   argv[5] = pkgdir
   tmp = exec(argv)
+  call unblock(pkgdir)
   do i = 1 to words(files)
     fn = word(files, i)
     call mkdirs(tgtDir)
@@ -1110,6 +1112,9 @@ doUpdate: procedure = .int
       return 1
     end
   end
+  do i = 1 to words(flist)
+    call unblock(dir || '/' || word(flist, i) || '.new')
+  end
   vr = verifyRelease(dir, flist)
   vstat = word(vr, 1)
   vfile = word(vr, 2)
@@ -1156,6 +1161,38 @@ readAll: procedure = .string
     res = res || rl[i] || NL
   end
   return res
+
+/* Remove the "downloaded from the Internet" mark (Windows Zone.Identifier,
+   macOS quarantine) from a file or tree that rxpip itself downloaded or
+   unpacked, so binaries, DLLs and .so files in a package work. Never an error. */
+unblock: procedure = .void
+  arg path = .string
+  uv = .string[]
+  if getenv('OS') = 'Windows_NT' then do
+    wp = translate(path, '5C'x, '/')
+    uv[1] = 'cmd'
+    uv[2] = '/c'
+    uv[3] = 'dir /s /r "' || wp || '" 2>nul | find ":Zone.Identifier" >nul'
+    x = exec(uv)
+    if lastrc = 0 then do
+      pv = .string[]
+      pv[1] = 'powershell'
+      pv[2] = '-NoProfile'
+      pv[3] = '-NonInteractive'
+      pv[4] = '-Command'
+      pv[5] = "Get-ChildItem -LiteralPath '" || wp || "' -Recurse -Force | Unblock-File"
+      x = exec(pv)
+    end
+  end
+  else do
+    uv[1] = 'sh'
+    uv[2] = '-c'
+    uv[3] = '[ "$(uname -s)" = Darwin ] && xattr -dr com.apple.quarantine "$1" >/dev/null 2>&1; true'
+    uv[4] = 'sh'
+    uv[5] = path
+    x = exec(uv)
+  end
+  return
 
 /* the minisign public key that signs the releases */
 signKey: procedure = .string

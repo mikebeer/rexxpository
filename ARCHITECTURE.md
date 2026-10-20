@@ -499,6 +499,19 @@ launcher recompiles. The client finds its own folder from `RXPIP_CLIENT_DIR`
 (stamp `clientcheck.txt`) prints a hint on stderr (cREXX: stdout, not before
 `run`).
 
+### Removing the Internet mark from what rxpip downloads
+
+`Unblock(path)` (Regina/ooRexx; `unblock` in NetRexx/cREXX) removes the
+"downloaded from the Internet" attribute -- Windows `Zone.Identifier`, macOS
+`com.apple.quarantine` -- from the package archive before it is unpacked, from
+the unpacked tree under the client home, and from the files of a client update
+before they replace anything. REXX scripts are run by the interpreter and are
+never blocked, but binaries, DLLs and `.so` files in a package are. Windows:
+`dir /s /r` is a cheap test for the stream, and only if it is present PowerShell
+`Unblock-File` runs; macOS: `xattr -dr`; Linux does nothing. Every failure is
+ignored. `curl` does not set the mark itself, so this matters mainly when the
+files travel through a browser, a shared drive or a scanner before rxpip gets them.
+
 ### Signed client releases
 
 A release may contain `<file>.minisig` next to `<file>` (minisign, Ed25519). The

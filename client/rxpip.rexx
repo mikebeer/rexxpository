@@ -303,7 +303,9 @@ InstallOne: procedure expose home cfg.
 
   pkgdir = home || '/pkgs/' || name || '/' || ver
   call EnsureDir pkgdir
+  call Unblock cachefile
   'tar xzf "' || cachefile || '" -C "' || pkgdir || '" 2>' || NullSink()
+  call Unblock pkgdir
 
   /* flatten: copy every package file (any extension: .rexx, .rex, ...) into the shared lib/ dir so that
      unqualified CALLs resolve for `rxpip run` */
@@ -1387,6 +1389,9 @@ DoUpdate: procedure expose home cfg.
       return 1
     end
   end
+  do i = 1 to words(files)
+    call Unblock dir || '/' || word(files, i) || '.new'
+  end
   vr = VerifyRelease(dir, files)
   parse var vr vstat vfile
   req = (GetConfigValue(home, 'REQUIRE_SIGNATURE') = '1')
@@ -1415,6 +1420,20 @@ DoUpdate: procedure expose home cfg.
   call StampCheck home, latest, ''
   say 'rxpip: updated to' latest
   return 0
+
+/* Remove the "downloaded from the Internet" mark (Windows Zone.Identifier,
+   macOS quarantine) from a file or tree that rxpip itself downloaded or
+   unpacked, so that binaries, DLLs and .so files in a package work without
+   the user having to unblock them. Never an error. */
+Unblock: procedure
+  parse arg path
+  if IsWindows() then do
+    wp = translate(path, '\', '/')
+    'dir /s /r "' || wp || '" 2>nul | find ":Zone.Identifier" >nul'
+    if rc = 0 then 'powershell -NoProfile -NonInteractive -Command "Get-ChildItem -LiteralPath ''' || wp || ''' -Recurse -Force | Unblock-File" >nul 2>nul'
+  end
+  else '[ "$(uname -s)" = Darwin ] && xattr -dr com.apple.quarantine "' || path || '" >/dev/null 2>&1; true'
+  return
 
 /* the minisign public key that signs the releases */
 SignKey: procedure
