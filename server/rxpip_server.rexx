@@ -864,6 +864,15 @@ Web_Downloads: procedure
     say '<p>Install Regina (<code>brew install regina-rexx</code>), then:</p>'
     say '<pre>sudo curl -o /usr/local/bin/rxpip.rexx "' || base || 'rxpip.rexx"' || nl || 'sudo chmod +x /usr/local/bin/rxpip.rexx' || nl || 'sudo ln -sf rxpip.rexx /usr/local/bin/rxpip' || nl || 'rxpip help</pre>'
     say '<p class="mute">All three need <code>curl</code> and <code>tar</code>, which Windows 10 and later, macOS and Linux include. Later, <code>rxpip update</code> installs newer versions of the client.</p>'
+    say '<h2>If your computer blocks the download</h2>'
+    say '<p>The clients are plain-text scripts, and they are not code-signed: Microsoft and Apple charge for signing, and neither can sign a REXX script or a batch file in any case. Read the file before you run it if you like. The commands above, which fetch the files with <code>curl</code>, are not blocked, because <code>curl</code> does not mark files as downloaded from the Internet. Only files saved with a web browser carry that mark.</p>'
+    say '<p><b>Windows</b> (a browser download that says "Windows protected your PC", or a script that will not start): right-click the file, choose Properties, tick <b>Unblock</b> and click Apply. Or, in a command prompt:</p>'
+    say '<pre>powershell Unblock-File rxpip.rexx' || nl || 'powershell Unblock-File rxpip.bat</pre>'
+    say '<p><b>macOS</b> (a browser download that is refused or quarantined): in Terminal, remove the quarantine attribute from the file, then make it executable:</p>'
+    say '<pre>xattr -d com.apple.quarantine rxpip.rexx' || nl || 'chmod +x rxpip.rexx</pre>'
+    say '<p><b>Linux and macOS</b>, if a script will not start because it lost its execute permission: <code>chmod +x rxpip.rexx</code> (and for the other clients the launcher, for example <code>chmod +x rxpip-oorexx</code>).</p>'
+    say '<p><b>Check what you got.</b> Compare the SHA-256 in the tables below with your file:</p>'
+    say '<pre>Windows:  certutil -hashfile rxpip.rexx SHA256' || nl || 'macOS:    shasum -a 256 rxpip.rexx' || nl || 'Linux:    sha256sum rxpip.rexx</pre>'
     say '<h2>Other REXX interpreters</h2>'
   end
   kinds = 'regina oorexx netrexx crexx'
@@ -889,12 +898,12 @@ Web_Downloads: procedure
     files = FileField(dir || '/MANIFEST', 'FILES')
     say '<h2>' || title.i || ' <span class="mute">version ' || Esc(ver) || '</span></h2>'
     say '<p>' || need.i || '</p>'
-    say '<div class="tbl"><table><thead><tr><th>File</th><th>Size</th></tr></thead><tbody>'
+    say '<div class="tbl"><table><thead><tr><th>File</th><th>Size</th><th>SHA-256</th></tr></thead><tbody>'
     do j = 1 to words(files)
       f = word(files, j)
       if \IsSafeFileName(f) then iterate
       sz = stream(dir || '/' || f, 'c', 'query size')
-      say '<tr><td><a href="' || self || '?action=CLIENT&amp;kind=' || kind || '&amp;version=' || Esc(ver) || '&amp;file=' || Esc(f) || '">' || Esc(f) || '</a></td><td class="mute">' || sz || ' bytes</td></tr>'
+      say '<tr><td><a href="' || self || '?action=CLIENT&amp;kind=' || kind || '&amp;version=' || Esc(ver) || '&amp;file=' || Esc(f) || '">' || Esc(f) || '</a></td><td class="mute">' || sz || ' bytes</td><td class="mute"><code style="font-size:.75rem;word-break:break-all">' || Esc(FileField(dir || '/MANIFEST', 'SHA256-' || f)) || '</code></td></tr>'
     end
     say '</tbody></table></div>'
     say '<p>' || how.i || '</p>'
@@ -1932,6 +1941,26 @@ ClientLatest: procedure
   call stream f, 'c', 'close'
   return v
 
+/* SHA-256 of a file's bytes, or '' when no tool is available */
+FileSha256: procedure
+  parse arg path
+  first = ''
+  if IsWindows() then do
+    address system 'certutil -hashfile "' || translate(path, '\', '/') || '" SHA256' with output stem o.
+    if o.0 >= 2 then first = space(o.2, 0)
+  end
+  else do
+    address system 'sha256sum "' || path || '" 2>/dev/null' with output stem o.
+    if o.0 >= 1 then first = word(o.1, 1)
+    if \IsHex(first, 64) then do
+      address system 'shasum -a 256 "' || path || '" 2>/dev/null' with output stem o.
+      first = ''
+      if o.0 >= 1 then first = word(o.1, 1)
+    end
+  end
+  if \IsHex(first, 64) then return ''
+  return Lower(first)
+
 /* GET action=CLIENT&kind=K [&version=V] [&file=F]
    no file: the manifest; with file: the bytes. Public, also in a closed
    repository (clients must be able to update themselves). */
@@ -1959,6 +1988,10 @@ Action_Client: procedure
     say 'LATEST:' ClientLatest(root, kind)
     say 'MIN:' FileField(dir || '/MANIFEST', 'MIN')
     say 'FILES:' files
+    do i = 1 to words(files)
+      sm = FileField(dir || '/MANIFEST', 'SHA256-' || word(files, i))
+      if sm \= '' then say 'SHA256-' || word(files, i) || ':' sm
+    end
     return
   end
   if wordpos(file, files) = 0 | \IsSafeFileName(file) then do
@@ -2019,7 +2052,12 @@ Action_AdminClient: procedure
   call EnsureDir dir
   'tar xzf "' || stage || '" -C "' || dir || '" 2>' || NullSink()
   call DelFile stage
-  call ReplaceFile dir || '/MANIFEST', 'FILES: ' || vrest || '0a'x || 'MIN: ' || minv || '0a'x
+  mf = 'FILES: ' || vrest || '0a'x || 'MIN: ' || minv || '0a'x
+  do i = 1 to words(vrest)
+    sm = FileSha256(dir || '/' || word(vrest, i))
+    if sm \= '' then mf = mf || 'SHA256-' || word(vrest, i) || ': ' || sm || '0a'x
+  end
+  call ReplaceFile dir || '/MANIFEST', mf
   /* LATEST only moves forward */
   cur = ClientLatest(root, kind)
   if cur = '' | CompareVersions(ver, cur) > 0 then call ReplaceFile root || '/.clients/' || kind || '/LATEST', ver || '0a'x

@@ -125,7 +125,7 @@ are in [DEPLOY.md](DEPLOY.md) §8.
 
 ## Client updates, statistics and administrators
 
-The website has a **Get the rxpip client** page (`?action=DOWNLOADS`, linked from every page) with the newest release of each of the four clients and their launchers. Administrators publish releases with `tools/publish-clients.sh`.
+The website has a **Get the rxpip client** page (`?action=DOWNLOADS`, linked from every page) with the newest release of each of the four clients and their launchers. Administrators publish releases with `tools/publish-clients.sh`. The page shows SHA-256 checksums and explains how to unblock a browser-downloaded file on Windows (`Unblock-File`) and macOS (`xattr -d com.apple.quarantine`); the clients are not code-signed (fetching them with `curl`, as the page shows, avoids the issue).
 
 Clients send a short `X-Rxpip-Client: regina/1.2.0 (linux)` note with every
 request. `rxpip update [--check]` fetches the newest release of your kind of

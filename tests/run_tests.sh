@@ -594,6 +594,8 @@ expect "download page names the Regina client" "$D" "Regina REXX"
 expect "download page has a Windows section" "$D" "<h3>Windows</h3>"
 expect "download page has a Linux section" "$D" "<h3>Linux</h3>"
 expect "download page has a macOS section" "$D" "<h3>macOS</h3>"
+expect "download page explains unblocking on Windows" "$D" "Unblock-File rxpip.rexx"
+expect "download page explains the macOS quarantine" "$D" "xattr -d com.apple.quarantine"
 expect "and a ready curl command" "$D" "curl.exe -o rxpip.bat"
 expect "download page shows the version" "$D" "version 1.1.0"
 expect "download page links the files" "$D" "action=CLIENT&amp;kind=regina&amp;version=1.1.0&amp;file=rxpip.rexx"
@@ -611,6 +613,9 @@ expect "the release script publishes all four kinds" "$rel" "== crexx"
 expect "it reads the version from the source" "$rel" "== regina 1."
 D=$(curl -s "$BASE?action=DOWNLOADS")
 expect "now all four clients are listed" "$D" "cREXX"
+sha=$(sha256sum "$ROOT/client/rxpip.rexx" | cut -d" " -f1)
+expect "download page shows the SHA-256 of the file" "$D" "$sha"
+expect "the manifest carries the checksums" "$(curl -s "$BASE?action=CLIENT&kind=regina")" "SHA256-rxpip.rexx: $sha"
 expect "launchers are offered too" "$D" "rxpip-oorexx.bat"
 expect "ooRexx launcher is in the release" "$(curl -s "$BASE?action=CLIENT&kind=oorexx")" "rxpip-oorexx"
 adm rmadmin alice >/dev/null

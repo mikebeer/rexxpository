@@ -25,7 +25,7 @@ module.exports = function (D) {
   D.h3('Summary of changes');
   D.p('This edition is kept up to date as RXPIP grows; each change is listed here, newest first.');
   D.bullets([
-    '**20 October 2026.** A download page for the clients on the website (`?action=DOWNLOADS`); client releases include the launchers; `tools/publish-clients.sh` publishes all four kinds; updated launchers stay executable.',
+    '**20 October 2026.** Download page with sections for Windows, Linux and macOS, SHA-256 checksums and instructions for blocked downloads; a download page for the clients on the website (`?action=DOWNLOADS`); client releases include the launchers; `tools/publish-clients.sh` publishes all four kinds; updated launchers stay executable.',
     '**13 October 2026 (third edition).** Per-package private visibility and a closed-repository mode; install into the current directory with per-directory records, `rxpip find`, `--global` and `--target`; client version checking and self-update (`rxpip update`); usage statistics and an administrator role (`rxpip admin ...`).',
     '**12 October 2026 (second edition).** Clients for ooRexx, NetRexx and cREXX in addition to Regina (artifact platforms `any`, `netrexx`, `crexx`); moderated sign-up through the web interface, with an approval mail to the administrator; a test matrix that runs one scenario against every client.',
     '**12 October 2026 (first edition).** First edition. Covers the server and client as they stand after the hardening work of early October: header-only tokens, invitation-only accounts, per-package owner lists, upload limits, archive checks, the read-only web interface, and `>=` version requirements in `REQUIRE` lines.',
@@ -78,6 +78,14 @@ module.exports = function (D) {
   D.chapter('Installing the Client');
   D.h2('Downloading the client');
   D.p('The repository’s web page has a **Get the rxpip client** page (the link “get the client” at the top of every page, or `?action=DOWNLOADS`). It lists the newest release of each client, Regina, ooRexx, NetRexx and cREXX, with the files to download: the client itself and its launchers for Linux/macOS and Windows. Save all files of one client into one folder, make the launcher executable on Linux and macOS (`chmod +x`), and run it. The page is public, even when the repository is closed. Afterwards `rxpip update` keeps the client current. If you have the source kit instead, the sections below describe the same installation from the kit.');
+  D.h3('If the system blocks the download');
+  D.p('The clients are plain-text scripts and are not code-signed. Microsoft and Apple sell signing only for their own formats, and neither can sign a REXX script or a batch file. Files fetched with `curl` (the commands on the download page) are not marked as coming from the Internet and run without trouble. A file saved with a web browser carries that mark, and the system may refuse it:');
+  D.bullets([
+    '**Windows:** right-click the file, choose Properties, tick Unblock and click Apply; or run `powershell Unblock-File rxpip.rexx` (and the same for `rxpip.bat`; `powershell Unblock-File *` unblocks everything in the folder). Do this before unpacking a zip archive, not after.',
+    '**macOS:** run `xattr -d com.apple.quarantine rxpip.rexx` in Terminal (`xattr rxpip.rexx` shows the attributes), then `chmod +x rxpip.rexx`.',
+    '**Linux and macOS:** if a launcher lost its execute permission, run `chmod +x` on it.',
+    '**Check the file:** the download page shows the SHA-256 of every file. Compare with `certutil -hashfile <file> SHA256` (Windows), `shasum -a 256 <file>` (macOS) or `sha256sum <file>` (Linux).',
+  ]);
   D.h2('What you need');
   D.bullets([
     '**Regina REXX** 3.9 or later, with `regina -a` working. The `-a` option makes every command-line argument arrive separately; without it, an argument with spaces such as `--summary="a short text"` would be split apart.',
