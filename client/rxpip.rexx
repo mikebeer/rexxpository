@@ -1306,7 +1306,7 @@ RecordInstalled: procedure
    ======================================================================= */
 
 ClientVersion: procedure
-  return '1.2.0'
+  return '1.3.0'
 
 ClientKind: procedure
   if IsOoRexx() then return 'oorexx'
