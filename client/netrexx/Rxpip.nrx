@@ -889,7 +889,7 @@ class Rxpip
      client source; the launcher recompiles it on the next start.
      ===================================================================== */
   method clientVersion static returns Rexx
-    return '1.3.0'
+    return '1.4.0'
 
   method clientHeader static returns Rexx
     os = Rexx(System.getProperty('os.name')).lower.word(1)

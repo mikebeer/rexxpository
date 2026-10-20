@@ -272,10 +272,14 @@ Action_Artifacts:
   do while rest \= ''
     parse var rest one '0a'x rest
     if one = '' then iterate
-    parse var one k '01'x p '01'x f
+    parse var one k '01'x p '01'x f '01'x t '01'x ab '01'x rt '01'x bt
     say 'KIND:' k
     say 'PLATFORM:' p
     say 'FILES:' f
+    if t \= '' then say 'TREE:' t
+    if ab \= '' then say 'ABI:' ab
+    if rt \= '' then say 'RUNTIME-REQUIRES:' rt
+    if bt \= '' then say 'BUILD-REQUIRES:' bt
     say ''
   end
   return
@@ -356,6 +360,9 @@ Action_Publish:
   platform = HdrOrQuery('HTTP_X_RXPIP_PLATFORM', qstring, 'PLATFORM')
   if platform = '' then platform = 'any'
   vis      = lower(strip(HdrOrQuery('HTTP_X_RXPIP_VISIBILITY', qstring, 'VISIBILITY')))
+  abi      = strip(HdrOrQuery('HTTP_X_RXPIP_ABI', qstring, 'ABI'))
+  rtreq    = strip(HdrOrQuery('HTTP_X_RXPIP_RUNTIME_REQUIRES', qstring, 'RUNTIME_REQUIRES'))
+  bldreq   = strip(HdrOrQuery('HTTP_X_RXPIP_BUILD_REQUIRES', qstring, 'BUILD_REQUIRES'))
   token    = value('HTTP_X_RXPIP_TOKEN',,'ENVIRONMENT')
 
   if \IsSafeToken(name) then do
@@ -367,11 +374,23 @@ Action_Publish:
     return
   end
   if \IsSafeKind(kind) then do
-    call Fail 400, 'BAD_KIND', 'kind must be SOURCE or BYTECODE'
+    call Fail 400, 'BAD_KIND', 'kind must be SOURCE, BYTECODE or NATIVE'
     return
   end
   if \IsSafeToken(platform) then do
     call Fail 400, 'BAD_PLATFORM', 'invalid platform tag'
+    return
+  end
+  if kind = 'NATIVE' & translate(platform) = 'ANY' then do
+    call Fail 400, 'BAD_PLATFORM', 'a NATIVE artifact is specific to one system: give a platform tag such as crexx-linux-x86_64'
+    return
+  end
+  if abi \= '' & \IsSafeToken(abi) then do
+    call Fail 400, 'BAD_ABI', 'abi must be a short tag such as rxpa1'
+    return
+  end
+  if \IsSafePrereqs(rtreq) | \IsSafePrereqs(bldreq) then do
+    call Fail 400, 'BAD_PREREQS', 'runtime-requires/build-requires: space separated pkg:NAME[>=VER], lib:NAME or cmd:NAME entries'
     return
   end
   if \IsSafeMeta(author, 100) | \IsSafeMeta(summary, 200) then do
@@ -467,13 +486,14 @@ Action_Publish:
   data = ''
 
   v = ValidateArchive(stage)
-  parse var v vstat '01'x vrest
+  parse var v vstat '01'x vfiles '01'x vtree
   if vstat \= 'OK' then do
     call DelFile stage
-    call Fail 400, 'BAD_ARCHIVE', vrest
+    call Fail 400, 'BAD_ARCHIVE', vfiles
     return
   end
-  filelist = vrest
+  filelist = vfiles
+  treelist = vtree
 
   if claiming then do
     if \WriteNew(ownersfile, user || '0a'x) then do
@@ -491,7 +511,7 @@ Action_Publish:
   if claiming | vis \= '' then call SetVisibility authdir, name, finalvis
   call EnsureDir root || '/' || name || '/' || ver || '/artifacts'
   call MoveFile stage, artfile
-  call WriteArtifactRecord root, name, ver, kind, platform, filelist
+  call WriteArtifactRecord root, name, ver, kind, platform, filelist, treelist, abi, rtreq, bldreq
   note = WriteMetaIfAbsent(root, name, ver, author, summary, requires)
   call LogEvent root || '/.stats', 'PUB', name, ver, kind || '/' || platform
 
@@ -563,6 +583,30 @@ IsSafeRequires: procedure
     if pos('>=', w) > 0 then parse var w n '>=' v
     if \IsSafeToken(n) then return 0
     if pos('>=', w) > 0 & \IsSafeVersion(v) then return 0
+  end
+  return 1
+
+/* system prerequisites of an artifact: "pkg:NAME[>=VER]" (pkg-config),
+   "lib:NAME" (shared library) or "cmd:NAME" (program), blank separated.
+   Strictly character-limited, because clients pass them to the system. */
+IsSafePrereqs: procedure
+  parse arg r
+  if r = '' then return 1
+  if \IsSafeMeta(r, 500) then return 0
+  do i = 1 to words(r)
+    w = word(r, i)
+    parse var w kd ':' rest
+    kd = lower(kd)
+    if kd \= 'pkg' & kd \= 'lib' & kd \= 'cmd' then return 0
+    nm = rest
+    vv = ''
+    if pos('>=', rest) > 0 then parse var rest nm '>=' vv
+    if nm = '' | length(nm) > 80 then return 0
+    if verify(nm, 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-') \= 0 then return 0
+    if left(nm, 1) = '-' | left(nm, 1) = '.' then return 0
+    if pos('>=', rest) > 0 then do
+      if kd \= 'pkg' | \IsSafeVersion(vv) then return 0
+    end
   end
   return 1
 
@@ -659,11 +703,16 @@ WriteNew: procedure
   call value 'RXPIP_NEW_CONTENT', '', 'ENVIRONMENT'
   return ok
 
-/* Validate an uploaded .rxpkg (gzip'd tar): at most 200 members, regular
-   files only (no symlinks/hardlinks/devices), top-level only, safe names.
-   Returns 'OK' '01'x 'space separated file list'  or  'ERR' '01'x 'why'. */
+/* Validate an uploaded .rxpkg (gzip'd tar): at most 500 members, regular
+   files and plain directories only (no symlinks/hardlinks/devices), and
+   safe RELATIVE paths: every path component is a safe name (no leading
+   dot, so no "..", no absolute paths), at most 6 levels deep, 200 chars.
+   With flat = 'FLAT' (client releases) nested paths are refused as before.
+   Returns 'OK' 01 'top-level files' 01 'every file path'  or  'ERR' 01 'why'.
+   The top-level list is what clients copy into the shared lib/ directory
+   (so older clients keep working); the full list is the package tree. */
 ValidateArchive: procedure
-  parse arg f
+  parse arg f, flat
   nul = NullSink()
   tn = TempDir() || '/rxpip_vn_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
   tv = TempDir() || '/rxpip_vv_' || translate(time('L'), '__', ':.') || '_' || random(1,99999) || '.tmp'
@@ -689,22 +738,35 @@ ValidateArchive: procedure
   call DelFile tv
   if nn = 0 then return 'ERR' || '01'x || 'not a readable gzip-compressed tar archive, or it is empty'
   if nn \= nv then return 'ERR' || '01'x || 'archive listing is inconsistent (unusual member names?)'
-  if nn > 200 then return 'ERR' || '01'x || 'archive has more than 200 members'
+  if nn > 500 then return 'ERR' || '01'x || 'archive has more than 500 members'
   files = ''
+  tree = ''
   do i = 1 to nn
     t = left(vl.i, 1)
-    if t \= '-' & t \= 'd' then return 'ERR' || '01'x || 'archive contains a link or special file; only regular files are allowed'
+    if t \= '-' & t \= 'd' then return 'ERR' || '01'x || 'archive contains a link or special file; only regular files and directories are allowed'
     n = strip(nm.i)
     if left(n, 2) = './' then n = substr(n, 3)
     if right(n, 1) = '/' then n = left(n, length(n) - 1)
     if n = '' | n = '.' then iterate
-    if t = 'd' then return 'ERR' || '01'x || 'archive contains a directory; files must be at the top level'
-    if \IsSafeFileName(n) then return 'ERR' || '01'x || 'unsafe or nested file name in archive: ' || left(n, 40)
-    files = files n
+    if length(n) > 200 then return 'ERR' || '01'x || 'file path too long in archive: ' || left(n, 40)
+    depth = 0
+    rest = n
+    do until rest = ''
+      parse var rest comp '/' rest
+      depth = depth + 1
+      if \IsSafeFileName(comp) then return 'ERR' || '01'x || 'unsafe file name in archive: ' || left(n, 40)
+    end
+    if depth > 6 then return 'ERR' || '01'x || 'archive paths may be at most 6 levels deep: ' || left(n, 40)
+    if flat = 'FLAT' & (depth > 1 | t = 'd') then return 'ERR' || '01'x || 'files must be at the top level (no directories): ' || left(n, 40)
+    if t = 'd' then iterate
+    if wordpos(n, tree) > 0 then return 'ERR' || '01'x || 'duplicate file in archive: ' || left(n, 40)
+    tree = tree n
+    if depth = 1 then files = files n
   end
   files = strip(files)
-  if files = '' then return 'ERR' || '01'x || 'archive contains no files'
-  return 'OK' || '01'x || files
+  tree = strip(tree)
+  if tree = '' then return 'ERR' || '01'x || 'archive contains no files'
+  return 'OK' || '01'x || files || '01'x || tree
 
 /* PACKAGE.META describes a version and is written once, by its first
    artifact. Later artifacts of the same version (e.g. a BYTECODE one) must
@@ -989,7 +1051,8 @@ Web_Package: procedure
     do while rest \= ''
       parse var rest one '0a'x rest
       if one = '' then iterate
-      parse var one k '01'x p '01'x f
+      parse var one k '01'x p '01'x f '01'x t '01'x .
+      if t \= '' then f = t
       dl = self || '?action=DOWNLOAD&amp;name=' || Esc(name) || '&amp;version=' || Esc(ver) || '&amp;kind=' || Esc(k) || '&amp;platform=' || Esc(p)
       say '<tr><td>' || Esc(k) || '</td><td>' || Esc(p) || '</td><td>' || Esc(f) || '</td><td><a href="' || dl || '">Download</a></td></tr>'
     end
@@ -2063,8 +2126,8 @@ Action_AdminClient: procedure
   call charout stage, data
   call stream stage, 'c', 'close'
   data = ''
-  v = ValidateArchive(stage)
-  parse var v vstat '01'x vrest
+  v = ValidateArchive(stage, 'FLAT')
+  parse var v vstat '01'x vrest '01'x .
   if vstat \= 'OK' then do
     call DelFile stage
     call Fail 400, 'BAD_ARCHIVE', vrest
@@ -2489,6 +2552,7 @@ IsSafeKind: procedure
   k = translate(strip(k))
   if k = 'SOURCE' then return 1
   if k = 'BYTECODE' then return 1
+  if k = 'NATIVE' then return 1
   return 0
 
 ArtifactFileName: procedure
@@ -2503,84 +2567,72 @@ ArtifactsMetaPath: procedure
   parse arg root, name, ver
   return root || '/' || name || '/' || ver || '/ARTIFACTS.META'
 
-/* every artifact record for a version, as KIND|PLATFORM|FILES lines
-   ('01'x field sep, '0a'x record sep); '' if none published yet */
+/* every artifact record for a version: one line per artifact, fields
+   KIND PLATFORM FILES TREE ABI RUNTIME-REQUIRES BUILD-REQUIRES separated
+   by '01'x, records by '0a'x; '' if none published yet */
 ArtifactsStr: procedure
   parse arg root, name, ver
   amf = ArtifactsMetaPath(root, name, ver)
   if \FileExists(amf) then return ''
   out = ''
-  curK = ''; curP = ''; curF = ''; have = 0
+  curK = ''; curP = ''; curF = ''; curT = ''; curA = ''; curR = ''; curB = ''; have = 0
   do while lines(amf) > 0
     l = linein(amf)
     if l = '' then do
-      if have then out = out || curK || '01'x || curP || '01'x || curF || '0a'x
-      curK = ''; curP = ''; curF = ''; have = 0
+      if have then out = out || ArtifactLine(curK, curP, curF, curT, curA, curR, curB) || '0a'x
+      curK = ''; curP = ''; curF = ''; curT = ''; curA = ''; curR = ''; curB = ''; have = 0
       iterate
     end
     parse var l key ':' val
     key = translate(strip(key))
     val = strip(val)
-    if key = 'KIND'     then do; curK = val; have = 1; end
-    if key = 'PLATFORM' then curP = val
-    if key = 'FILES'    then curF = val
+    if key = 'KIND'             then do; curK = val; have = 1; end
+    if key = 'PLATFORM'         then curP = val
+    if key = 'FILES'            then curF = val
+    if key = 'TREE'             then curT = val
+    if key = 'ABI'              then curA = val
+    if key = 'RUNTIME-REQUIRES' then curR = val
+    if key = 'BUILD-REQUIRES'   then curB = val
   end
-  if have then out = out || curK || '01'x || curP || '01'x || curF || '0a'x
+  if have then out = out || ArtifactLine(curK, curP, curF, curT, curA, curR, curB) || '0a'x
   call stream amf, 'c', 'close'
   return out
 
+ArtifactLine: procedure
+  parse arg k, p, f, t, a, r, b
+  return k || '01'x || p || '01'x || f || '01'x || t || '01'x || a || '01'x || r || '01'x || b
+
 /* add or replace (by KIND+PLATFORM) one artifact record */
 WriteArtifactRecord: procedure
-  parse arg root, name, ver, kind, platform, files
+  parse arg root, name, ver, kind, platform, files, tree, abi, rtreq, bldreq
   amf = ArtifactsMetaPath(root, name, ver)
-  k. = ''; p. = ''; f. = ''
-  cnt = 0
-  if FileExists(amf) then do
-    curK = ''; curP = ''; curF = ''; have = 0
-    do while lines(amf) > 0
-      l = linein(amf)
-      if l = '' then do
-        if have then do
-          cnt = cnt + 1
-          k.cnt = curK; p.cnt = curP; f.cnt = curF
-        end
-        curK = ''; curP = ''; curF = ''; have = 0
-        iterate
-      end
-      parse var l key ':' val
-      key = translate(strip(key))
-      val = strip(val)
-      if key = 'KIND'     then do; curK = val; have = 1; end
-      if key = 'PLATFORM' then curP = val
-      if key = 'FILES'    then curF = val
-    end
-    if have then do
-      cnt = cnt + 1
-      k.cnt = curK; p.cnt = curP; f.cnt = curF
-    end
-    call stream amf, 'c', 'close'
-  end
+  recs = ArtifactsStr(root, name, ver)
   tmp = amf || '.new'
+  call DelFile tmp
+  newline = ArtifactLine(kind, platform, files, tree, abi, rtreq, bldreq)
   replaced = 0
-  do i = 1 to cnt
-    if translate(k.i) = translate(kind) & translate(p.i) = translate(platform) then do
-      call charout tmp, 'KIND: ' || kind || '0a'x
-      call charout tmp, 'PLATFORM: ' || platform || '0a'x
-      call charout tmp, 'FILES: ' || files || '0a'x
-      call charout tmp, '0a'x
+  out = ''
+  do while recs \= ''
+    parse var recs one '0a'x recs
+    if one = '' then iterate
+    parse var one k '01'x p '01'x .
+    if translate(k) = translate(kind) & translate(p) = translate(platform) then do
+      out = out || newline || '0a'x
       replaced = 1
     end
-    else do
-      call charout tmp, 'KIND: ' || k.i || '0a'x
-      call charout tmp, 'PLATFORM: ' || p.i || '0a'x
-      call charout tmp, 'FILES: ' || f.i || '0a'x
-      call charout tmp, '0a'x
-    end
+    else out = out || one || '0a'x
   end
-  if \replaced then do
-    call charout tmp, 'KIND: ' || kind || '0a'x
-    call charout tmp, 'PLATFORM: ' || platform || '0a'x
-    call charout tmp, 'FILES: ' || files || '0a'x
+  if \replaced then out = out || newline || '0a'x
+  do while out \= ''
+    parse var out one '0a'x out
+    parse var one k '01'x p '01'x f '01'x t '01'x ab '01'x rt '01'x bt
+    call charout tmp, 'KIND: ' || k || '0a'x
+    call charout tmp, 'PLATFORM: ' || p || '0a'x
+    call charout tmp, 'FILES: ' || f || '0a'x
+    if t  \= '' then call charout tmp, 'TREE: ' || t || '0a'x
+    if ab \= '' then call charout tmp, 'ABI: ' || ab || '0a'x
+    if rt \= '' then call charout tmp, 'RUNTIME-REQUIRES: ' || rt || '0a'x
+    if bt \= '' then call charout tmp, 'BUILD-REQUIRES: ' || bt || '0a'x
     call charout tmp, '0a'x
   end
   call stream tmp, 'c', 'close'

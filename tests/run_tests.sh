@@ -181,7 +181,7 @@ make("evil_hidden.rxpkg", [reg(".hidden")])
 make("empty.rxpkg", [])
 open(os.path.join(w, "notgzip.rxpkg"), "wb").write(b"this is not an archive at all\n" * 20)
 EOF
-for t in evil_symlink evil_dotdot evil_abs evil_nested evil_dir evil_name evil_hidden empty notgzip; do
+for t in evil_symlink evil_dotdot evil_abs evil_name evil_hidden empty notgzip; do
   pub archtest 1.0.0 "$TOKA" "$WORK/$t.rxpkg"
   expect "archive '$t' is rejected" "$BODY" "BAD_ARCHIVE"
 done
@@ -630,6 +630,73 @@ expect_not "signature files are not listed as downloads of their own" "$D" "<tr>
 adm rmadmin alice >/dev/null
 expect "removed administrators are refused again" "$(curl -s -X POST -H "X-Rxpip-Token: $TOKA" "$BASE?action=ADMINSTATS")" "FORBIDDEN"
 adm addadmin alice >/dev/null
+
+# ============================================================================
+section "package directories and native artifacts"
+python3 - "$WORK" << 'EOF2'
+import io, os, sys, tarfile
+w = sys.argv[1]
+def make(name, members):
+    with tarfile.open(os.path.join(w, name), "w:gz") as t:
+        for m in members:
+            t.addfile(*m)
+def reg(name, data=b"say 'x'\n", mode=0o644):
+    ti = tarfile.TarInfo(name); ti.size = len(data); ti.mode = mode; return (ti, io.BytesIO(data))
+def dirm(name):
+    ti = tarfile.TarInfo(name); ti.type = tarfile.DIRTYPE; ti.mode = 0o755; return (ti, None)
+def sym(name, target):
+    ti = tarfile.TarInfo(name); ti.type = tarfile.SYMTYPE; ti.linkname = target; return (ti, None)
+blob = bytes(range(256)) * 40
+make("tree_ok.rxpkg", [reg("a.rexx"), dirm("doc"), reg("doc/README.md", b"docs\n"), reg("share/data/x.bin", blob)])
+make("tree_deep.rxpkg", [reg("a.rexx"), reg("l1/l2/l3/l4/l5/l6/l7.rexx")])
+make("tree_dotdot.rxpkg", [reg("a.rexx"), reg("sub/../x.rexx")])
+make("tree_hidden.rxpkg", [reg("a.rexx"), reg(".git/config")])
+make("tree_badname.rxpkg", [reg("a.rexx"), reg("bad name/x.rexx")])
+make("tree_symlink.rxpkg", [reg("a.rexx"), sym("doc/link", "/etc/passwd")])
+make("native_ok.rxpkg", [reg("providers/libprov.so", blob, 0o755), reg("libs/libglue.so", blob), reg("share/schemas/s.xml", b"<s/>")])
+EOF2
+pub treepkg 1.0.0 "$TOKA" "$WORK/tree_ok.rxpkg"
+expect "an archive with subdirectories is accepted" "$BODY" "STATUS: OK"
+A=$(get 'action=ARTIFACTS&name=treepkg&version=1.0.0')
+expect "FILES lists only the top-level files (older clients copy these)" "$A" "FILES: a.rexx"
+expect_not "FILES does not list nested paths" "$(grep '^FILES:' <<<"$A")" "doc/"
+expect "TREE lists every file" "$A" "TREE: a.rexx doc/README.md share/data/x.bin"
+curl -s "$BASE?action=DOWNLOAD&name=treepkg&version=1.0.0" -o "$WORK/tree_dl.rxpkg"
+cmp -s "$WORK/tree_ok.rxpkg" "$WORK/tree_dl.rxpkg" && ok "the tree package downloads byte-identical" || bad "the tree package downloads byte-identical"
+for t in deep dotdot hidden badname symlink; do
+  pub treebad 1.0.0 "$TOKA" "$WORK/tree_$t.rxpkg"
+  expect "tree archive '$t' is rejected" "$BODY" "BAD_ARCHIVE"
+done
+[ -e "$REPO/treebad" ] && bad "rejected tree archives leave no package behind" || ok "rejected tree archives leave no package behind"
+expect "the package page shows the tree" "$(curl -s "$BASE?action=PKG&name=treepkg")" "doc/README.md"
+# native artifacts
+pub treepkg 1.0.0 "$TOKA" "$WORK/native_ok.rxpkg" -H "X-Rxpip-Kind: NATIVE"
+expect "NATIVE without a platform is refused" "$BODY" "BAD_PLATFORM"
+pub treepkg 1.0.0 "$TOKA" "$WORK/native_ok.rxpkg" -H "X-Rxpip-Kind: NATIVE" -H "X-Rxpip-Platform: crexx-linux-x86_64" -H "X-Rxpip-Abi: rx pa"
+expect "a bad ABI is refused" "$BODY" "BAD_ABI"
+for bad_req in 'cmd:a;rm' 'foo:bar' 'pkg:a>=x' 'lib:' 'cmd:../x' 'lib:a>=1'; do
+  pub treepkg 1.0.0 "$TOKA" "$WORK/native_ok.rxpkg" -H "X-Rxpip-Kind: NATIVE" -H "X-Rxpip-Platform: crexx-linux-x86_64" -H "X-Rxpip-Runtime-Requires: $bad_req"
+  expect "prerequisite [$bad_req] is refused" "$BODY" "BAD_PREREQS"
+done
+pub treepkg 1.0.0 "$TOKA" "$WORK/native_ok.rxpkg" -H "X-Rxpip-Kind: NATIVE" -H "X-Rxpip-Platform: crexx-linux-x86_64" \
+  -H "X-Rxpip-Abi: rxpa1" -H "X-Rxpip-Runtime-Requires: pkg:gtk4>=4.10 lib:gtk-4 cmd:glib-compile-schemas" -H "X-Rxpip-Build-Requires: cmd:cc"
+expect "a native artifact is accepted next to the source" "$BODY" "STATUS: OK"
+A=$(get 'action=ARTIFACTS&name=treepkg&version=1.0.0')
+expect "both artifacts are listed" "$A" "COUNT: 2"
+expect "the ABI is listed" "$A" "ABI: rxpa1"
+expect "the runtime requirements are listed" "$A" "RUNTIME-REQUIRES: pkg:gtk4>=4.10 lib:gtk-4 cmd:glib-compile-schemas"
+expect "the build requirements are listed separately" "$A" "BUILD-REQUIRES: cmd:cc"
+expect "native files are in the tree" "$A" "providers/libprov.so libs/libglue.so share/schemas/s.xml"
+pub treepkg 1.0.0 "$TOKA" "$WORK/native_ok.rxpkg" -H "X-Rxpip-Kind: NATIVE" -H "X-Rxpip-Platform: crexx-linux-x86_64"
+expect "a native artifact is immutable too" "$BODY" "ALREADY_EXISTS"
+pub treepkg 1.0.0 "$TOKA" "$WORK/native_ok.rxpkg" -H "X-Rxpip-Kind: NATIVE" -H "X-Rxpip-Platform: crexx-darwin-aarch64" -H "X-Rxpip-Abi: rxpa1"
+expect "another platform can be added" "$BODY" "STATUS: OK"
+expect "three artifacts now" "$(get 'action=ARTIFACTS&name=treepkg&version=1.0.0')" "COUNT: 3"
+curl -s "$BASE?action=DOWNLOAD&name=treepkg&version=1.0.0&kind=NATIVE&platform=crexx-linux-x86_64" -o "$WORK/nat_dl.rxpkg"
+cmp -s "$WORK/native_ok.rxpkg" "$WORK/nat_dl.rxpkg" && ok "the native artifact downloads byte-identical" || bad "the native artifact downloads byte-identical"
+# client releases stay flat
+c=$(curl -s -X POST -H "X-Rxpip-Token: $TOKA" -H "X-Rxpip-Kind: regina" -H "X-Rxpip-Version: 1.5.0" --data-binary @"$WORK/tree_ok.rxpkg" "$BASE?action=ADMINCLIENT")
+expect "client releases must stay flat" "$c" "BAD_ARCHIVE"
 
 # ============================================================================
 section "closed repository (RXPIP_CLOSED=1)"

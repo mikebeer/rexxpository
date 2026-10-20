@@ -1308,7 +1308,7 @@ RecordInstalled: procedure
    ======================================================================= */
 
 ClientVersion: procedure
-  return '1.3.0'
+  return '1.4.0'
 
 ClientKind: procedure
   if IsOoRexx() then return 'oorexx'
@@ -1778,7 +1778,7 @@ SelectBestArtifact: procedure
       curF = strip(substr(line,7))
       if translate(curK) = 'SOURCE' & translate(curP) = 'ANY' then ,
         bestSource = curK || '01'x || curP || '01'x || curF
-      if translate(curP) = translate(platformtag) then ,
+      if translate(curP) = translate(platformtag) & translate(curK) \= 'NATIVE' then ,
         bestExact = curK || '01'x || curP || '01'x || curF
       curK = ''; curP = ''
     end

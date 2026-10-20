@@ -17,7 +17,7 @@
    * Needs rxc, rxas and rxvm on the PATH (or CREXX_HOME/bin) for run/build.
    --------------------------------------------------------------------- */
 options levelb
-namespace rxpip expose home lang repoUrl NL SOH lastrc upgrade tgtDir recDir isGlobal forceOw readToken clientHdr
+namespace rxpip expose home lang repoUrl NL SOH lastrc upgrade tgtDir recDir isGlobal forceOw readToken clientHdr noNative skipRt instFail
 import rxfnsb
 
 main: procedure = .int
@@ -28,6 +28,11 @@ main: procedure = .int
   lastrc = 0
   upgrade = 0
   forceOw = 0
+  noNative = 0
+  skipRt = 0
+  instFail = 0
+  if getenv('RXPIP_NO_NATIVE') = '1' then noNative = 1
+  if getenv('RXPIP_SKIP_RUNTIME_CHECK') = '1' then skipRt = 1
   readToken = ''
   clientHdr = ''
   isGlobal = 0
@@ -74,6 +79,8 @@ main: procedure = .int
     when cmd = 'SCAN'      then call cmdScan(rest)
     when cmd = 'RUN'       then return cmdRun(rest)
     when cmd = 'BUILD'     then return cmdBuild(rest)
+    when cmd = 'PLATFORM'  then call cmdPlatform
+    when cmd = 'CHECK'     then return cmdCheck()
     when cmd = 'PUBLISH'   then return cmdPublish(rest)
     when cmd = 'CONFIG'    then call cmdConfig(rest)
     when cmd = 'REGISTER'  then return cmdRegister(rest)
@@ -90,6 +97,7 @@ main: procedure = .int
       return 1
     end
   end
+  if instFail = 1 then return 1
   return 0
 
 cmdHelp: procedure = .void
@@ -107,7 +115,10 @@ cmdHelp: procedure = .void
   say '  freeze                      print installed packages as name==version'
   say '  scan <file.crexx>           install packages named in REQUIRE comments'
   say '  run <file.crexx> [args]     scan + auto-install, compile with the packages, run'
-  say '  build <file.crexx> [--output=name]   compile with the packages into .rxbin files'
+  say '  build <file.crexx> [--output=name]   compile with the packages into .rxbin files; native plugins,'
+  say '                              libraries and data are copied along, with a run script'
+  say '  platform                    print this system platform tag (for publishing NATIVE artifacts)'
+  say '  check                       re-check the system prerequisites of the installed packages'
   say '  publish <pkgfile> --name=N --version=V [...]   upload a package (needs login)'
   say '  register --user=U --invite=CODE   create an account (invite-only); saves your token'
   say '  login [--token=T]           save a token (or read it from env RXPIP_TOKEN)'
@@ -126,6 +137,8 @@ cmdHelp: procedure = .void
   say '  --global, -g               use the shared store instead of the current directory'
   say '  --target=DIR, -t DIR       use directory DIR'
   say '  --force                    overwrite files that rxpip did not install'
+  say '  --no-native                (install) skip native builds, install the source only'
+  say '  --skip-runtime-check       (install) do not check system prerequisites (env RXPIP_SKIP_RUNTIME_CHECK=1 for run/build)'
   return
 
 /* =====================================================================
@@ -212,24 +225,63 @@ installOne: procedure = .string
   requires = stanzaField(info, 'REQUIRES')
 
   artresp = serverGet('ARTIFACTS', 'name=' || urlEnc(name) || '&version=' || urlEnc(ver))
-  chosen = selectBestArtifact(artresp)
-  if chosen = '' then do
-    say "rxpip: no compatible artifact for '" || name || "'" ver '(need SOURCE/' || lang || ')'
+  recs = artifactRecords(artresp)
+  base = pickBase(recs)
+  nat = ''
+  avail = nativeSummary(recs)
+  if avail \= '' & noNative = 0 then do
+    nat = pickNative(recs)
+    if nat = '' then do
+      say "rxpip: '" || name || "'" ver 'has native builds only for' avail
+      say '       this system is' platformTag() 'with ABI' supportedAbis() || '; use --no-native to install the source only, or ask the publisher for a build'
+      instFail = 1
+      return seen
+    end
+  end
+  if base = '' & nat = '' then do
+    say "rxpip: no compatible artifact for '" || name || "'" ver '(need SOURCE/' || lang || ' or a NATIVE build for ' || platformTag() || ')'
+    instFail = 1
     return seen
   end
-  p1 = pos(SOH, chosen)
-  kind = substr(chosen, 1, p1 - 1)
-  restc = substr(chosen, p1 + 1)
-  p2 = pos(SOH, restc)
-  platform = substr(restc, 1, p2 - 1)
-  files = substr(restc, p2 + 1)
-  say 'rxpip: installing' name ver || '(' || kind || '/' || platform || ') ...'
+  files = ''
+  tree = ''
+  rt = ''
+  bt = ''
+  if base \= '' then do
+    files = recField(base, 3)
+    tree = recField(base, 4)
+    if tree = '' then tree = files
+    rt = recField(base, 6)
+    bt = recField(base, 7)
+  end
+  if nat \= '' then do
+    nt = recField(nat, 4)
+    do k = 1 to words(nt)
+      if wordpos(word(nt, k), tree) > 0 then do
+        say "rxpip: '" || name || "'" ver 'is inconsistent: the source and native builds both contain' word(nt, k)
+        instFail = 1
+        return seen
+      end
+    end
+    rt = rt recField(nat, 6)
+    bt = bt recField(nat, 7)
+  end
+  rt = dedupe(rt)
+  bt = dedupe(bt)
 
-  cachefile = home || '/cache/' || name || '-' || ver || '-' || kind || '-' || platform || '.rxpkg'
-  if serverDownload(name, ver, kind, platform, cachefile) \= 0 then do
-    say 'rxpip: download failed for' name ver
-    return seen
+  /* system prerequisites: refuse clearly, before downloading anything */
+  if skipRt = 0 & rt \= '' then do
+    miss = runtimeMissing(rt)
+    if miss \= '' then do
+      say "rxpip: cannot install '" || name || "'" ver '- missing system prerequisites:' miss
+      say '       install them with your system package manager and run the command again'
+      say '       (--skip-runtime-check installs anyway)'
+      instFail = 1
+      return seen
+    end
   end
+
+  say 'rxpip: installing' name ver || ' (' || artLabel(base, nat) || ') ...'
   oldfiles = ''
   if curver \= '' then do
     /* replacing an older version: drop its files so none linger */
@@ -245,27 +297,47 @@ installOne: procedure = .string
       end
     end
   end
-  do k = 1 to words(oldfiles)
-    call rmfile(tgtDir || '/' || word(oldfiles, k))
-  end
+
   pkgdir = home || '/' || lang || '/pkgs/' || name || '/' || ver
   call rmtree(pkgdir)
   call mkdirs(pkgdir)
-  argv = .string[]
-  call unblock(cachefile)
-  argv[1] = 'tar'
-  argv[2] = 'xzf'
-  argv[3] = cachefile
-  argv[4] = '-C'
-  argv[5] = pkgdir
-  tmp = exec(argv)
+  do part = 1 to 2
+    rec = base
+    if part = 2 then rec = nat
+    if rec \= '' then do
+      kind = recField(rec, 1)
+      platform = recField(rec, 2)
+      cachefile = home || '/cache/' || name || '-' || ver || '-' || kind || '-' || platform || '.rxpkg'
+      if serverDownload(name, ver, kind, platform, cachefile) \= 0 then do
+        say 'rxpip: download failed for' name ver
+        return seen
+      end
+      call unblock(cachefile)
+      argv = .string[]
+      argv[1] = 'tar'
+      argv[2] = 'xzf'
+      argv[3] = cachefile
+      argv[4] = '-C'
+      argv[5] = pkgdir
+      tmp = exec(argv)
+    end
+  end
+  do k = 1 to words(oldfiles)
+    call rmfile(tgtDir || '/' || word(oldfiles, k))
+  end
   call unblock(pkgdir)
+  /* the shared lib/ gets the top-level files of the source build; plugins,
+     libraries and data stay inside the package directory */
   do i = 1 to words(files)
     fn = word(files, i)
     call mkdirs(tgtDir)
     call copyFile(pkgdir || '/' || fn, tgtDir || '/' || fn)
   end
-  call recordInstalled(name, ver, author, summary, requires, files)
+  extra = ''
+  if nat \= '' then extra = extra || 'NATIVE: ' || recField(nat, 2) || ' ' || recField(nat, 5) || NL
+  if rt \= '' then extra = extra || 'RUNTIME-REQUIRES: ' || rt || NL
+  if bt \= '' then extra = extra || 'BUILD-REQUIRES: ' || bt || NL
+  call recordInstalled(name, ver, author, summary, requires, files, extra)
 
   reqs = translate(requires, ' ', ',')
   do i = 1 to words(reqs)
@@ -363,6 +435,8 @@ parseScope: procedure = .string[]
       if i <= a.0 then dir = a[i]
     end
     else if w = '--force' then forceOw = 1
+    else if w = '--no-native' then noNative = 1
+    else if w = '--skip-runtime-check' then skipRt = 1
     else do
       n = n + 1
       res[n] = w
@@ -638,6 +712,12 @@ cmdRun: procedure = .int
   do i = 1 to words(reqs)
     seen = installOne(word(reqs, i), seen)
   end
+  bad = verifyInstalled(seen, 0)
+  if bad \= '' then do
+    call charout , bad
+    say '       install the missing prerequisites and try again (env RXPIP_SKIP_RUNTIME_CHECK=1 skips the check)'
+    return 1
+  end
   tmp = home || '/run_' || pid()
   all = compileAll(src, tmp)
   if all = '' then do
@@ -645,12 +725,37 @@ cmdRun: procedure = .int
     call rmtree(tmp)
     return 1
   end
-  argv = .string[]
-  argv[1] = tool('rxvm')
-  do i = 1 to words(all)
-    argv[i + 1] = tmp || '/' || word(all, i)
+  /* native plugins, libraries and data of the packages in use */
+  provs = collectDirs(seen, 'providers', ';')
+  libs = collectDirs(seen, 'libs', pathSep())
+  envs = .string[]
+  ne = 0
+  if libs \= '' then do
+    curl = getenv(libVar())
+    if curl \= '' then libs = libs || pathSep() || curl
+    ne = ne + 1
+    envs[ne] = libVar() || '=' || libs
   end
-  n = words(all) + 1
+  do i = 1 to words(seen)
+    d = pkgDirOf(word(seen, i))
+    if d \= '' then do
+      ne = ne + 1
+      envs[ne] = envName(word(seen, i)) || '=' || d
+    end
+  end
+  argv = .string[]
+  n = 1
+  argv[1] = tool('rxvm')
+  if provs \= '' then do
+    n = n + 1
+    argv[n] = '--provider-path'
+    n = n + 1
+    argv[n] = provs
+  end
+  do i = 1 to words(all)
+    n = n + 1
+    argv[n] = tmp || '/' || word(all, i)
+  end
   if a.0 > 1 then do
     n = n + 1
     argv[n] = '-a'
@@ -659,7 +764,7 @@ cmdRun: procedure = .int
       argv[n] = a[i]
     end
   end
-  out = exec(argv)
+  out = execEnv(argv, envs)
   if out \= '' then call charout , out
   rcv = lastrc
   call rmtree(tmp)
@@ -685,24 +790,120 @@ cmdBuild: procedure = .int
   do i = 1 to words(reqs)
     seen = installOne(word(reqs, i), seen)
   end
+  bad = verifyInstalled(seen, 1)
+  if bad \= '' then do
+    call charout , bad
+    say '       install the missing prerequisites and try again (env RXPIP_SKIP_RUNTIME_CHECK=1 skips the check)'
+    return 1
+  end
   call mkdirs(out)
   all = compileAll(src, out)
   if all = '' then do
     say 'rxpip: compilation failed'
     return 1
   end
+  copied = exportNative(seen, out, cls, all)
   say 'rxpip: wrote' out '(run: rxvm' || ' ' || out || '/' || cls || ' ' || out || '/<module>... )'
   return 0
+
+/* copy the packages that carry plugins, libraries or data into <out>/pkgs
+   and write run.sh / run.bat that start the program with them; prints the
+   system prerequisites rxpip cannot ship. Returns the packages copied. */
+exportNative: procedure = .string
+  arg names = .string, out = .string, cls = .string, all = .string
+  copied = ''
+  reqs = ''
+  do i = 1 to words(names)
+    nm = word(names, i)
+    d = pkgDirOf(nm)
+    if d \= '' then do
+      rt = stanzaField(findRecord(nm), 'RUNTIME-REQUIRES')
+      if rt \= '' then reqs = reqs rt
+      if fileExists(d || '/providers') | fileExists(d || '/libs') | fileExists(d || '/share') then do
+        dst = out || '/pkgs/' || nm
+        call mkdirs(dst)
+        argv = .string[]
+        argv[1] = 'cp'
+        argv[2] = '-R'
+        argv[3] = d || '/.'
+        argv[4] = dst
+        x = exec(argv)
+        copied = copied nm
+      end
+    end
+  end
+  copied = strip(copied)
+  if copied \= '' then do
+    provs = ''
+    libs = ''
+    envsh = ''
+    bprov = ''
+    blib = ''
+    benv = ''
+    do i = 1 to words(copied)
+      nm = word(copied, i)
+      dst = out || '/pkgs/' || nm
+      if fileExists(dst || '/providers') then do
+        if provs \= '' then provs = provs || ';'
+        provs = provs || '$d/pkgs/' || nm || '/providers'
+        if bprov \= '' then bprov = bprov || ';'
+        bprov = bprov || '%D%pkgs\' || nm || '\providers'
+      end
+      if fileExists(dst || '/libs') then do
+        if libs \= '' then libs = libs || pathSep()
+        libs = libs || '$d/pkgs/' || nm || '/libs'
+        blib = blib || '%D%pkgs\' || nm || '\libs;'
+      end
+      envsh = envsh || 'export ' || envName(nm) || '="$d/pkgs/' || nm || '"' || NL
+      benv = benv || 'set "' || envName(nm) || '=%D%pkgs\' || nm || '"' || NL
+    end
+    mods = ''
+    bmods = ''
+    do i = 1 to words(all)
+      mods = mods || ' "$d/' || word(all, i) || '"'
+      bmods = bmods || ' "%D%' || word(all, i) || '"'
+    end
+    vm = 'rxvm'
+    sh = '#!/bin/sh' || NL || 'd=$(cd "$(dirname "$0")" && pwd)' || NL
+    sh = sh || 'RXVM=rxvm' || NL
+    sh = sh || '[ -n "$CREXX_HOME" ] && [ -x "$CREXX_HOME/bin/rxvm" ] && RXVM="$CREXX_HOME/bin/rxvm"' || NL
+    if libs \= '' then do
+      lv = libVar()
+      sh = sh || 'export ' || lv || '="' || libs || '${' || lv || ':+' || pathSep() || '$' || lv || '}"' || NL
+    end
+    sh = sh || envsh
+    po = ''
+    if provs \= '' then po = ' --provider-path "' || provs || '"'
+    sh = sh || 'if [ $# -gt 0 ]; then exec "$RXVM"' || po || mods || ' -a "$@"; fi' || NL
+    sh = sh || 'exec "$RXVM"' || po || mods || NL
+    call writeText(out || '/run.sh', sh)
+    cm = .string[]
+    cm[1] = 'chmod'
+    cm[2] = '755'
+    cm[3] = out || '/run.sh'
+    x = exec(cm)
+    bt = '@echo off' || NL || 'set "D=%~dp0"' || NL
+    if blib \= '' then bt = bt || 'set "PATH=' || blib || '%PATH%"' || NL
+    bt = bt || benv
+    bpo = ''
+    if bprov \= '' then bpo = ' --provider-path "' || bprov || '"'
+    bt = bt || 'if "%~1"=="" (rxvm' || bpo || bmods || ') else (rxvm' || bpo || bmods || ' -a %*)' || NL
+    call writeText(out || '/run.bat', bt)
+    say 'rxpip: native plugins/libraries/data for' copied 'copied to' out || '/pkgs; start the program with' out || '/run.sh'
+  end
+  reqs = dedupe(reqs)
+  if reqs \= '' then say 'rxpip: external prerequisites rxpip does not ship (install on the target system):' reqs
+  return copied
 
 /* ---- accounts, tokens, owners ---- */
 cmdPublish: procedure = .int
   arg a = .string[]
   if a.0 < 1 then do
-    say 'usage: rxpip publish <file.rxpkg> --name=X --version=Y [--token=T] [--author=A --summary=S --requires=R --kind=SOURCE|BYTECODE --platform=TAG --private|--public]'
+    say 'usage: rxpip publish <file.rxpkg> --name=X --version=Y [--token=T] [--author=A --summary=S --requires=R --kind=SOURCE|BYTECODE|NATIVE --platform=TAG --abi=TAG --runtime-requires=L --build-requires=L --private|--public]'
     return 1
   end
   if \fileExists(a[1]) then do
-    say 'usage: rxpip publish <file.rxpkg> --name=X --version=Y [--token=T] [--author=A --summary=S --requires=R --kind=SOURCE|BYTECODE --platform=TAG --private|--public]'
+    say 'usage: rxpip publish <file.rxpkg> --name=X --version=Y [--token=T] [--author=A --summary=S --requires=R --kind=SOURCE|BYTECODE|NATIVE --platform=TAG --abi=TAG --runtime-requires=L --build-requires=L --private|--public]'
     return 1
   end
   pkgfile = a[1]
@@ -711,7 +912,10 @@ cmdPublish: procedure = .int
   kind = opt(a, 'kind')
   if kind = '' then kind = 'SOURCE'
   platform = opt(a, 'platform')
-  if platform = '' then platform = lang
+  if platform = '' then do
+    platform = lang
+    if upper(kind) = 'NATIVE' then platform = platformTag()
+  end
   token = resolveToken(a)
   if name = '' | ver = '' | token = '' then do
     say 'rxpip: --name, --version and a login are required (rxpip login, or --token=T, or env RXPIP_TOKEN)'
@@ -729,9 +933,28 @@ cmdPublish: procedure = .int
   hdrs[5] = 'X-Rxpip-Requires: ' || opt(a, 'requires')
   hdrs[6] = 'X-Rxpip-Kind: ' || kind
   hdrs[7] = 'X-Rxpip-Platform: ' || platform
+  nh = 7
+  if opt(a, 'abi') \= '' then do
+    nh = nh + 1
+    hdrs[nh] = 'X-Rxpip-Abi: ' || opt(a, 'abi')
+  end
+  if opt(a, 'runtime-requires') \= '' then do
+    nh = nh + 1
+    hdrs[nh] = 'X-Rxpip-Runtime-Requires: ' || opt(a, 'runtime-requires')
+  end
+  if opt(a, 'build-requires') \= '' then do
+    nh = nh + 1
+    hdrs[nh] = 'X-Rxpip-Build-Requires: ' || opt(a, 'build-requires')
+  end
   do j = 1 to a.0
-    if a[j] = '--private' then hdrs[8] = 'X-Rxpip-Visibility: private'
-    if a[j] = '--public' then hdrs[8] = 'X-Rxpip-Visibility: public'
+    if a[j] = '--private' then do
+      nh = nh + 1
+      hdrs[nh] = 'X-Rxpip-Visibility: private'
+    end
+    if a[j] = '--public' then do
+      nh = nh + 1
+      hdrs[nh] = 'X-Rxpip-Visibility: public'
+    end
   end
   sec = .string[]
   sec[1] = 'X-Rxpip-Token: ' || token
@@ -1032,7 +1255,7 @@ tokenLooksValid: procedure = .int
    the launcher recompiles it on the next start.
    ===================================================================== */
 clientVersion: procedure = .string
-  return '1.3.0'
+  return '1.4.0'
 
 setClientHeader: procedure = .void
   os = 'unknown'
@@ -1471,6 +1694,380 @@ showResponse: procedure = .int
   return 1
 
 /* =====================================================================
+   NATIVE ARTIFACTS  (platform builds, system prerequisites, plugins)
+   ---------------------------------------------------------------------
+   A package version can carry, besides its SOURCE/crexx artifact, NATIVE
+   artifacts: one per platform tag (crexx-<os>-<arch>) and interface level
+   (ABI, e.g. rxpa1). The client installs the source plus the native build
+   that matches this system, or refuses with a clear message.
+   Layout convention inside a package (all optional):
+     providers/   RXPA provider plugins   -> rxvm --provider-path
+     libs/        shared libraries        -> LD_LIBRARY_PATH / DYLD_ / PATH
+     share/ ...   data, docs, licences    -> RXPIP_PKG_<NAME> points at the
+                                             package directory
+   ===================================================================== */
+osName: procedure = .string
+  os = 'unknown'
+  out = .string[]
+  address crexx "platform" output out
+  do i = 1 to out.0
+    if left(out[i], 3) = 'os=' then os = lower(strip(substr(out[i], 4)))
+  end
+  return os
+
+platformTag: procedure = .string
+  os = 'unknown'
+  arch = 'unknown'
+  out = .string[]
+  address crexx "platform" output out
+  do i = 1 to out.0
+    if left(out[i], 3) = 'os=' then os = lower(strip(substr(out[i], 4)))
+    if left(out[i], 5) = 'arch=' then arch = lower(strip(substr(out[i], 6)))
+  end
+  if arch = 'amd64' | arch = 'x64' then arch = 'x86_64'
+  if arch = 'arm64' then arch = 'aarch64'
+  return lang || '-' || os || '-' || arch
+
+supportedAbis: procedure = .string
+  v = getenv('RXPIP_ABI')
+  if v = '' then v = getConfig('NATIVE_ABI')
+  if v = '' then v = 'rxpa1'
+  return translate(lower(v), ' ', ',')
+
+cmdPlatform: procedure = .void
+  say platformTag()
+  say 'abi:' supportedAbis()
+  return
+
+/* the ARTIFACTS response as one record per artifact:
+   kind SOH platform SOH files SOH tree SOH abi SOH runtime SOH build */
+artifactRecords: procedure = .string[]
+  arg resp = .string
+  res = .string[]
+  n = 0
+  k = ''
+  p = ''
+  f = ''
+  t = ''
+  ab = ''
+  rt = ''
+  bt = ''
+  txt = resp
+  do while txt \= ''
+    ln = nextLine(txt)
+    if ln = '' then do
+      if k \= '' then do
+        n = n + 1
+        res[n] = k || SOH || p || SOH || f || SOH || t || SOH || ab || SOH || rt || SOH || bt
+      end
+      k = ''
+      p = ''
+      f = ''
+      t = ''
+      ab = ''
+      rt = ''
+      bt = ''
+    end
+    else if left(ln, 5) = 'KIND:' then k = strip(substr(ln, 6))
+    else if left(ln, 9) = 'PLATFORM:' then p = strip(substr(ln, 10))
+    else if left(ln, 6) = 'FILES:' then f = strip(substr(ln, 7))
+    else if left(ln, 5) = 'TREE:' then t = strip(substr(ln, 6))
+    else if left(ln, 4) = 'ABI:' then ab = strip(substr(ln, 5))
+    else if left(ln, 17) = 'RUNTIME-REQUIRES:' then rt = strip(substr(ln, 18))
+    else if left(ln, 15) = 'BUILD-REQUIRES:' then bt = strip(substr(ln, 16))
+  end
+  if k \= '' then do
+    n = n + 1
+    res[n] = k || SOH || p || SOH || f || SOH || t || SOH || ab || SOH || rt || SOH || bt
+  end
+  return res
+
+/* field number idx (1-based) of a SOH-separated record */
+recField: procedure = .string
+  arg rec = .string, idx = .int
+  txt = rec
+  do i = 1 to idx - 1
+    q = pos(SOH, txt)
+    if q = 0 then return ''
+    txt = substr(txt, q + 1)
+  end
+  q = pos(SOH, txt)
+  if q = 0 then return txt
+  return substr(txt, 1, q - 1)
+
+/* the SOURCE artifact for this language, or '' */
+pickBase: procedure = .string
+  arg recs = .string[]
+  do i = 1 to recs.0
+    if upper(recField(recs[i], 1)) = 'SOURCE' & lower(recField(recs[i], 2)) = lang then return recs[i]
+  end
+  return ''
+
+/* the NATIVE artifact for this system (platform tag and a supported ABI);
+   the ABI listed first in supportedAbis() wins; '' if none fits */
+pickNative: procedure = .string
+  arg recs = .string[]
+  tag = platformTag()
+  abis = supportedAbis()
+  best = ''
+  bestRank = 9999
+  do i = 1 to recs.0
+    if upper(recField(recs[i], 1)) = 'NATIVE' & lower(recField(recs[i], 2)) = tag then do
+      ab = lower(recField(recs[i], 5))
+      rank = 5000
+      if ab \= '' then rank = wordpos(ab, abis)
+      if ab = '' | rank > 0 then do
+        if rank < bestRank then do
+          best = recs[i]
+          bestRank = rank
+        end
+      end
+    end
+  end
+  return best
+
+/* "platform/abi platform/abi ..." for every NATIVE artifact, '' if none */
+nativeSummary: procedure = .string
+  arg recs = .string[]
+  out = ''
+  do i = 1 to recs.0
+    if upper(recField(recs[i], 1)) = 'NATIVE' then do
+      ab = recField(recs[i], 5)
+      if ab = '' then ab = 'any-abi'
+      out = out || ' ' || recField(recs[i], 2) || '/' || ab
+    end
+  end
+  return strip(out)
+
+artLabel: procedure = .string
+  arg base = .string, nat = .string
+  res = ''
+  if base \= '' then res = recField(base, 1) || '/' || recField(base, 2)
+  if nat \= '' then do
+    if res \= '' then res = res || ' + '
+    res = res || recField(nat, 1) || '/' || recField(nat, 2)
+  end
+  return res
+
+/* a space-separated list without repeated words */
+dedupe: procedure = .string
+  arg w = .string
+  out = ''
+  do i = 1 to words(w)
+    if wordpos(word(w, i), out) = 0 then out = out word(w, i)
+  end
+  return strip(out)
+
+safeWord: procedure = .int
+  arg s = .string
+  ok = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-'
+  if s = '' then return 0
+  do i = 1 to length(s)
+    if pos(substr(s, i, 1), ok) = 0 then return 0
+  end
+  return 1
+
+/* the prerequisites in reqs ("pkg:NAME[>=VER]", "lib:NAME", "cmd:NAME")
+   that this system lacks, as "entry (why); entry (why)"; '' if all there */
+runtimeMissing: procedure = .string
+  arg reqs = .string
+  miss = ''
+  do i = 1 to words(reqs)
+    w = word(reqs, i)
+    why = prereqProblem(w)
+    if why \= '' then do
+      if miss \= '' then miss = miss || '; '
+      miss = miss || w || ' (' || why || ')'
+    end
+  end
+  return miss
+
+/* '' if the prerequisite is satisfied, else why not */
+prereqProblem: procedure = .string
+  arg w = .string
+  c = pos(':', w)
+  if c < 2 then return 'not a valid entry'
+  kd = lower(substr(w, 1, c - 1))
+  nm = substr(w, c + 1)
+  ver = ''
+  q = pos('>=', nm)
+  if q > 0 then do
+    ver = substr(nm, q + 2)
+    nm = substr(nm, 1, q - 1)
+  end
+  if safeWord(nm) = 0 then return 'not a valid name'
+  if ver \= '' then do
+    if safeWord(ver) = 0 then return 'not a valid version'
+  end
+  win = 0
+  if getenv('OS') = 'Windows_NT' then win = 1
+  argv = .string[]
+  if kd = 'pkg' then do
+    argv[1] = 'pkg-config'
+    argv[2] = '--version'
+    x = exec(argv)
+    if lastrc \= 0 then return 'pkg-config is not installed, so it cannot be checked'
+    argv = .string[]
+    argv[1] = 'pkg-config'
+    if ver = '' then do
+      argv[2] = '--exists'
+      argv[3] = nm
+    end
+    else do
+      argv[2] = '--atleast-version=' || ver
+      argv[3] = nm
+    end
+    x = exec(argv)
+    if lastrc = 0 then return ''
+    if ver \= '' then return 'not found or older than ' || ver
+    return 'not found'
+  end
+  if kd = 'cmd' then do
+    if win = 1 then do
+      argv[1] = 'cmd'
+      argv[2] = '/c'
+      argv[3] = 'where ' || nm || ' >nul 2>nul'
+    end
+    else do
+      argv[1] = 'sh'
+      argv[2] = '-c'
+      argv[3] = 'command -v "$1" >/dev/null 2>&1'
+      argv[4] = 'sh'
+      argv[5] = nm
+    end
+    x = exec(argv)
+    if lastrc = 0 then return ''
+    return 'program not found'
+  end
+  if kd = 'lib' then do
+    if win = 1 then do
+      argv[1] = 'cmd'
+      argv[2] = '/c'
+      argv[3] = 'where ' || nm || '.dll >nul 2>nul'
+    end
+    else do
+      argv[1] = 'sh'
+      argv[2] = '-c'
+      sc = 'case "$1" in lib*) p="$1";; *) p="lib$1";; esac; '
+      sc = sc || 'for d in $(echo "$LD_LIBRARY_PATH:$DYLD_LIBRARY_PATH" | tr : " ") /usr/lib /usr/lib64 /usr/local/lib /lib /lib64 '
+      sc = sc || '/usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu /opt/homebrew/lib /opt/local/lib; do '
+      sc = sc || 'for f in "$d/$p".so "$d/$p".so.* "$d/$p".dylib "$d/$p".*.dylib "$d/$p"; do [ -e "$f" ] && exit 0; done; done; '
+      sc = sc || 'ldconfig -p 2>/dev/null | grep -q "$p\.so" && exit 0; exit 1'
+      argv[3] = sc
+      argv[4] = 'sh'
+      argv[5] = nm
+    end
+    x = exec(argv)
+    if lastrc = 0 then return ''
+    return 'library not found'
+  end
+  return 'unknown kind (use pkg:, lib: or cmd:)'
+
+/* check the installed packages in names; returns one line per problem, ''
+   if everything is in place. build = 1 also checks the build tools. */
+verifyInstalled: procedure = .string
+  arg names = .string, build = .int
+  bad = ''
+  do i = 1 to words(names)
+    nm = word(names, i)
+    rec = findRecord(nm)
+    if rec \= '' then do
+      rt = stanzaField(rec, 'RUNTIME-REQUIRES')
+      if rt \= '' & skipRt = 0 then do
+        miss = runtimeMissing(rt)
+        if miss \= '' then bad = bad || "rxpip: '" || nm || "' needs system prerequisites: " || miss || NL
+      end
+      if build = 1 then do
+        bt = stanzaField(rec, 'BUILD-REQUIRES')
+        if bt \= '' & skipRt = 0 then do
+          miss = runtimeMissing(bt)
+          if miss \= '' then bad = bad || "rxpip: '" || nm || "' needs build tools: " || miss || NL
+        end
+      end
+    end
+  end
+  return bad
+
+cmdCheck: procedure = .int
+  recs = records()
+  names = ''
+  do i = 1 to recs.0
+    names = names stanzaField(recs[i], 'NAME')
+  end
+  bad = verifyInstalled(strip(names), 1)
+  if bad = '' then do
+    say 'rxpip: all system prerequisites of the installed packages are in place'
+    return 0
+  end
+  call charout , bad
+  return 1
+
+/* directory of an installed package (the store of this install scope) */
+pkgDirOf: procedure = .string
+  arg nm = .string
+  v = installedVersion(nm)
+  if v = '' then return ''
+  return home || '/' || lang || '/pkgs/' || nm || '/' || v
+
+/* the existing <pkgdir>/sub directories of the packages in names, joined by sep */
+collectDirs: procedure = .string
+  arg names = .string, sub = .string, sep = .string
+  res = ''
+  do i = 1 to words(names)
+    d = pkgDirOf(word(names, i))
+    if d \= '' then do
+      if fileExists(d || '/' || sub) then do
+        if res \= '' then res = res || sep
+        res = res || d || '/' || sub
+      end
+    end
+  end
+  return res
+
+envName: procedure = .string
+  arg nm = .string
+  return 'RXPIP_PKG_' || translate(upper(nm), '_', '-.')
+
+/* run argv with extra environment variables (name=value entries) */
+execEnv: procedure = .string
+  arg argv = .string[], envs = .string[]
+  if envs.0 = 0 then return exec(argv)
+  full = .string[]
+  n = 0
+  if getenv('OS') = 'Windows_NT' then do
+    cl = ''
+    do i = 1 to envs.0
+      cl = cl || 'set "' || envs[i] || '" && '
+    end
+    do i = 1 to argv.0
+      cl = cl || '"' || argv[i] || '" '
+    end
+    n = n + 1; full[n] = 'cmd'
+    n = n + 1; full[n] = '/c'
+    n = n + 1; full[n] = cl
+    return exec(full)
+  end
+  n = n + 1; full[n] = 'env'
+  do i = 1 to envs.0
+    n = n + 1; full[n] = envs[i]
+  end
+  do i = 1 to argv.0
+    n = n + 1; full[n] = argv[i]
+  end
+  return exec(full)
+
+/* the library search variable of this system */
+libVar: procedure = .string
+  os = osName()
+  if os = 'darwin' | os = 'macos' then return 'DYLD_LIBRARY_PATH'
+  if os = 'windows' | getenv('OS') = 'Windows_NT' then return 'PATH'
+  return 'LD_LIBRARY_PATH'
+
+pathSep: procedure = .string
+  if libVar() = 'PATH' then return ';'
+  return ':'
+
+/* =====================================================================
    STANZAS, VERSIONS, ARTIFACTS
    ===================================================================== */
 nextLine: procedure = .string
@@ -1536,25 +2133,6 @@ compareVersions: procedure = .int
   return 0
 
 /* the artifact to install: SOURCE/<lang> (this client's language) */
-selectBestArtifact: procedure = .string
-  arg resp = .string
-  best = ''
-  curK = ''
-  curP = ''
-  txt = resp
-  do while txt \= ''
-    ln = nextLine(txt)
-    if left(ln, 5) = 'KIND:' then curK = strip(substr(ln, 6))
-    else if left(ln, 9) = 'PLATFORM:' then curP = strip(substr(ln, 10))
-    else if left(ln, 6) = 'FILES:' then do
-      f = strip(substr(ln, 7))
-      if upper(curK) = 'SOURCE' & lower(curP) = lang then best = curK || SOH || curP || SOH || f
-      curK = ''
-      curP = ''
-    end
-  end
-  return best
-
 urlEnc: procedure = .string
   arg s = .string
   out = ''
@@ -1630,13 +2208,13 @@ removeRecord: procedure = .void
   return
 
 recordInstalled: procedure = .void
-  arg name = .string, ver = .string, author = .string, summary = .string, requires = .string, files = .string
+  arg name = .string, ver = .string, author = .string, summary = .string, requires = .string, files = .string, extra = .string
   call removeRecord(name)
   call mkdirs(recDir)
   idx = recDir || '/installed.txt'
   cur = ''
   if fileExists(idx) then cur = loadtext(idx, NL)
-  cur = cur || 'NAME: ' || name || NL || 'VERSION: ' || ver || NL || 'AUTHOR: ' || author || NL || 'SUMMARY: ' || summary || NL || 'REQUIRES: ' || requires || NL || 'FILES: ' || files || NL || NL
+  cur = cur || 'NAME: ' || name || NL || 'VERSION: ' || ver || NL || 'AUTHOR: ' || author || NL || 'SUMMARY: ' || summary || NL || 'REQUIRES: ' || requires || NL || 'FILES: ' || files || NL || extra || NL
   call writeText(idx, cur)
   return
 

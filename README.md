@@ -214,6 +214,32 @@ Square: procedure
   return n * n
 ```
 
+A package may also contain **subdirectories** (up to 6 levels, 500 files,
+safe names only) with documentation, licences, data files or binary files
+of any kind (byte-identical on the way). The top-level files go to the
+shared `lib/`; everything else stays in the package directory
+(`<home>/pkgs/<name>/<version>/`).
+
+**Native builds.** A version can carry `NATIVE` artifacts besides its
+source: one per platform tag (`crexx-linux-x86_64`, see `rxpip platform`)
+and interface level (`--abi=rxpa1`), each with system prerequisites that
+are checked, not installed:
+
+```
+rxpip publish gtk-src.rxpkg --name=crexx-gtk --version=0.1.0
+rxpip publish gtk-linux.rxpkg --name=crexx-gtk --version=0.1.0 --kind=NATIVE \
+      --abi=rxpa1 --runtime-requires="pkg:gtk4>=4.10 lib:gtk-4" --build-requires="cmd:cc"
+```
+
+`providers/` (RXPA plugins), `libs/` (shared libraries) and `share/`
+(data) inside a native artifact are handed to the VM by `rxpip run` of
+the cREXX client (`--provider-path`, library search path,
+`RXPIP_PKG_<NAME>`), and copied into the output of `rxpip build` together
+with `run.sh`/`run.bat`. A missing or incompatible prerequisite fails the
+install clearly (`--skip-runtime-check` overrides, `rxpip check`
+re-verifies). `--no-native` installs the source only. See the manual,
+chapter 4.
+
 **Gotcha to know about:** don't name an exported routine the same as a
 REXX built-in function (`Reverse`, `Date`, `Random`, …). REXX identifier
 lookup is case-insensitive and checks routine labels *before* built-ins,

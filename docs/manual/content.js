@@ -55,15 +55,16 @@ module.exports = function (D) {
   D.p('`rxpip run demo.rexx` reads the `REQUIRE` lines, installs anything that is missing together with its own dependencies, and then runs the program. `rxpip build demo.rexx` does the same but writes out a single self-contained REXX file instead of running it.');
   D.h3('Why run and build, and not just install');
   D.p('Regina and ooRexx find an external routine by file name: a call to `Square(7)` runs the file `Square.rexx` (or `.rex`) in the current directory or on the `PATH`. That works for a package whose files each hold one routine and are named after it, and you can use such a package straight from the directory it was installed in. It does not work when one file holds several routines, or when a routine in one file needs a label in another. For those cases RXPIP uses a method that works identically everywhere: it joins your program, a safety `exit`, and the source of every installed package of the shared store into one ordinary REXX program, in which every required routine is simply another label. `run` and `build` do this.');
-  D.h2('Artifacts: source and bytecode');
+  D.h2('Artifacts: source, bytecode and native builds');
   D.p('Each version of a package can carry several //artifacts//. An artifact has a //kind// and a //platform//:');
   D.table(['Kind', 'Platform', 'Meaning'], [
     ['`SOURCE`', '`any`', 'Classic REXX source. The default; installed by the Regina and ooRexx clients.'],
     ['`SOURCE`', '`netrexx`', 'NetRexx source (`.nrx`, one class per file); installed by the NetRexx client.'],
     ['`SOURCE`', '`crexx`', 'cREXX Level B source (`.crexx` modules); installed by the cREXX client.'],
     ['`BYTECODE`', 'for example `crexx-linux-x86_64`', 'A precompiled form for one interpreter, operating system and architecture. Optional; published in addition to the source artifact, never instead of it.'],
+    ['`NATIVE`', 'for example `crexx-linux-x86_64`', 'Platform-specific plugins, shared libraries and data (for example for a GUI toolkit binding). Installed by the cREXX client together with the source artifact; see Chapter 4.'],
   ], [1500, 3200, 4938], 'Artifact kinds');
-  D.p('When installing, the client asks the server which artifacts exist for the version, takes an exact match for its own platform tag if there is one, and otherwise falls back to the source artifact for its own language (`any`, `netrexx` or `crexx`). A client never installs another language’s artifact. In this release only source artifacts are in use; the bytecode kind is reserved for later (see Chapter 11).');
+  D.p('When installing, the client asks the server which artifacts exist for the version, takes an exact match for its own platform tag if there is one, and otherwise falls back to the source artifact for its own language (`any`, `netrexx` or `crexx`). A client never installs another language’s artifact. Source artifacts are what nearly all packages use; the bytecode kind is reserved for later (see Chapter 11), and native artifacts are described in Chapter 4.');
   D.h2('Supported REXX interpreters');
   D.p('The server is written for Regina REXX 3.9 and serves every client. There is one client for each family of REXX:');
   D.table(['Interpreter', 'Client', 'Installs', 'What `rxpip run` does'], [
@@ -237,7 +238,7 @@ module.exports = function (D) {
   // ------------------------------------------------------------ Chapter 4
   D.chapter('Creating and Publishing a Package');
   D.h2('What a package is');
-  D.p('A package is a gzip-compressed tar archive, conventionally named `<name>-<version>.rxpkg`, that contains one or more `.rexx` files at its top level. The name, version, author, summary and requirements are not inside the archive; you give them when you publish.');
+  D.p('A package is a gzip-compressed tar archive, conventionally named `<name>-<version>.rxpkg`, that contains one or more source files at its top level and, if you wish, subdirectories with documentation, data and binary files. The name, version, author, summary and requirements are not inside the archive; you give them when you publish.');
   D.h2('Writing the routines');
   D.p('Write your routines as labelled procedures, as in the example `mathutils.rexx` of the kit:');
   D.code([
@@ -270,8 +271,8 @@ module.exports = function (D) {
   D.p('The same command works in a Windows command prompt. The server accepts an archive only if all of these hold:');
   D.bullets([
     'it is a gzip-compressed tar archive, at most 5 MiB (5 242 880 bytes) in size unless the operator has changed the limit;',
-    'it holds at most 200 members, all regular files at the top level: no directories, symbolic or hard links, or special files;',
-    'every file name is 1 to 100 characters from letters, digits, `.`, `_` and `-`, and does not begin with a dot.',
+    'it holds at most 500 members: regular files and plain directories, no symbolic or hard links and no special files;',
+    'every path is relative and at most 200 characters and 6 levels deep; every name in it is 1 to 100 characters from letters, digits, `.`, `_` and `-`, and does not begin with a dot (so no `..` and no absolute paths).',
   ]);
   D.h2('Publishing');
   D.p('Publishing needs an account (Chapter 5). Once you are logged in:');
@@ -292,8 +293,11 @@ module.exports = function (D) {
     ['`--author=<text>`', 'Optional; at most 100 characters, no control characters.'],
     ['`--summary=<text>`', 'Optional one-line description; at most 200 characters. It is what `search` looks at.'],
     ['`--requires=<list>`', 'Optional; names, or `name>=version`, separated by spaces or commas; at most 500 characters in all.'],
-    ['`--kind=SOURCE|BYTECODE`', 'Default `SOURCE`.'],
-    ['`--platform=<tag>`', 'Default `any`. For bytecode, a tag such as `crexx-linux-x86_64`.'],
+    ['`--kind=SOURCE|BYTECODE|NATIVE`', 'Default `SOURCE`.'],
+    ['`--platform=<tag>`', 'Default `any` (`crexx` for the cREXX client, this system’s tag for `NATIVE`). For bytecode and native builds, a tag such as `crexx-linux-x86_64`; `rxpip platform` prints yours.'],
+    ['`--abi=<tag>`', 'Native builds: the interface level the plugins were built for, for example `rxpa1`.'],
+    ['`--runtime-requires=<list>`', 'System prerequisites needed to use the package, see below.'],
+    ['`--build-requires=<list>`', 'System prerequisites needed only to build programs with it.'],
     ['`--token=<token>`', 'Use this token instead of the saved login (see Chapter 5). The environment variable `RXPIP_TOKEN` does the same without putting the token in your shell history.'],
   ], [3000, 6638], 'Options of rxpip publish');
   D.h3('Rules of publishing');
@@ -303,6 +307,26 @@ module.exports = function (D) {
     '**Metadata is set once per version** by its first artifact. If a later artifact of the same version (for example a bytecode artifact) supplies different metadata, the server keeps the original and says so in a `NOTE:` line.',
     'A refused upload leaves nothing behind and does not claim the name.',
   ]);
+  D.h2('Subdirectories, binary files and native builds');
+  D.p('A package archive may contain subdirectories and files of any kind. Binary files (images, data, shared libraries) travel byte for byte. When a package is installed, the files at the top level go to the install directory as before; everything else stays in the package directory, `<home>/<language>/pkgs/<name>/<version>/`, so that the README of one package can never overwrite the README of another. Put documentation in `doc/`, licences in `licenses/` and data in `share/`.');
+  D.p('A package that needs compiled code for the operating system and processor, such as a binding to a GUI toolkit, publishes that code as a separate `NATIVE` artifact of the same version, one per platform, next to its ordinary source artifact:');
+  D.code([
+    '$ rxpip platform',
+    'crexx-linux-x86_64',
+    'abi: rxpa1',
+    '$ rxpip publish gtk-src.rxpkg --name=crexx-gtk --version=0.1.0',
+    '$ rxpip publish gtk-linux.rxpkg --name=crexx-gtk --version=0.1.0 --kind=NATIVE \\',
+    '    --abi=rxpa1 --runtime-requires="pkg:gtk4>=4.10 lib:gtk-4 cmd:glib-compile-schemas" \\',
+    '    --build-requires="cmd:cc"',
+  ], 'Publishing a package with a native build');
+  D.p('The archive of a native artifact uses this layout; every directory is optional:');
+  D.table(['Directory', 'Contents', 'What rxpip does with it'], [
+    ['`providers/`', 'RXPA provider plugins', 'Passed to the VM with `rxvm --provider-path`.'],
+    ['`libs/`', 'Shared libraries the plugins load', 'Added to `LD_LIBRARY_PATH` (Linux), `DYLD_LIBRARY_PATH` (macOS) or `PATH` (Windows) for the program.'],
+    ['`share/` and anything else', 'Data, schemas, icons', 'Found through the environment variable `RXPIP_PKG_<NAME>` (the name in capitals, with `-` and `.` replaced by `_`), which holds the package directory.'],
+  ], [1700, 3000, 4938], 'Layout of a native artifact');
+  D.p('System prerequisites are listed as `pkg:NAME` or `pkg:NAME>=VERSION` (looked up with pkg-config), `lib:NAME` (a shared library such as `gtk-4`) and `cmd:NAME` (a program), separated by blanks. rxpip never installs them; it checks them and, when one is missing, refuses with a message that names it, installs nothing and exits with a non-zero code. `rxpip check` repeats the check for everything installed, and `rxpip run` and `rxpip build` check again before they start.');
+  D.p('When the cREXX client installs a package that has native builds, it installs the source artifact and the native artifact whose platform tag equals its own and whose ABI it supports (`rxpa1` unless the environment variable `RXPIP_ABI` or the setting `NATIVE_ABI` says otherwise). If the version has native builds but none fits, the installation is refused and the message lists the platforms that are available. `--no-native` installs the source only; `--skip-runtime-check` installs without checking the prerequisites. `rxpip run` hands the plugins, libraries and data of all packages in use to the VM; `rxpip build` copies them into `<output>/pkgs/`, writes `run.sh` and `run.bat` that start the program with them, and prints the system prerequisites that the target machine still needs. The Regina, ooRexx and NetRexx clients install the source artifact only and ignore native artifacts.');
   D.h2('Packages for NetRexx and cREXX');
   D.p('A NetRexx package is a tar of `.nrx` files, each defining one class; a cREXX package is a tar of `.crexx` files, each a module with a `namespace` line. Publish them with the platform that names the language, so that only the matching client installs them:');
   D.code([
@@ -730,6 +754,8 @@ module.exports = function (D) {
     ['`rxpip uninstall <name>`', 'Remove a package'],
     ['`rxpip list`', 'List installed packages'],
     ['`rxpip freeze`', 'Installed packages as `name==version`'],
+    ['`rxpip platform`', 'cREXX client: print this system’s platform tag and ABI (for publishing native builds)'],
+    ['`rxpip check`', 'cREXX client: re-check the system prerequisites of the installed packages'],
     ['`rxpip scan <file.rexx>`', 'Install the packages a program requires'],
     ['`rxpip run <file.rexx> [args]`', 'Install what is required, merge and run'],
     ['`rxpip build <file.rexx> [--output=<file>]`', 'Install what is required, write a stand-alone program'],

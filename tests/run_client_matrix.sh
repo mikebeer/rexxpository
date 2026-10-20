@@ -65,6 +65,90 @@ make_fixtures() {  # $1 = client name ; creates $WORK/fx_$1/{lib1.rxpkg,lib2.rxp
     esac )
 }
 
+# ---- native artifacts: platform/ABI selection, system prerequisites, plugins ----
+native_tests() {
+  local RX=$1 n=$WORK/native; mkdir -p "$n/src/doc" "$n/nat/providers" "$n/nat/libs" "$n/nat/share" "$n/cxh/bin"
+  local tag; tag=$($RX platform | head -1)
+  expect "platform prints the tag" "$tag" "crexx-"
+  printf 'options levelb\nnamespace gtkpkg expose gtkversion\nimport rxfnsb\ngtkversion: procedure = .string\n  return "4.10"\n' > "$n/src/gtkpkg.crexx"
+  echo docs > "$n/src/doc/README.md"
+  head -c 3000 /dev/urandom > "$n/nat/providers/libfakeprov.so"; head -c 2000 /dev/urandom > "$n/nat/libs/libglue.so"; echo data > "$n/nat/share/x.xml"
+  tar czf "$n/src.rxpkg" -C "$n/src" gtkpkg.crexx doc; tar czf "$n/nat.rxpkg" -C "$n/nat" providers libs share
+  local out
+  pubn() { $RX publish "$@" 2>&1; }
+  # only a build for another platform
+  pubn "$n/src.rxpkg" --name=npa --version=1.0.0 >/dev/null
+  pubn "$n/nat.rxpkg" --name=npa --version=1.0.0 --kind=NATIVE --platform=crexx-windows-x86_64 --abi=rxpa1 >/dev/null
+  mkdir -p "$n/c1"; out=$(cd "$n/c1" && $RX install npa 2>&1; echo "rc=$?")
+  expect "no native build for this system: refused" "$out" "has native builds only for crexx-windows-x86_64/rxpa1"
+  expect "the message names this system" "$out" "this system is $tag"
+  expect "the refusal is a non-zero exit" "$out" "rc=1"
+  if [ -z "$(ls "$n/c1")" ]; then ok "nothing is installed on refusal"; else bad "nothing is installed on refusal" "$(ls "$n/c1")"; fi
+  out=$(cd "$n/c1" && $RX install npa --no-native 2>&1); expect "--no-native installs the source only" "$out" "SOURCE/crexx)"
+  # unsupported ABI
+  pubn "$n/src.rxpkg" --name=npb --version=1.0.0 >/dev/null
+  pubn "$n/nat.rxpkg" --name=npb --version=1.0.0 --kind=NATIVE --abi=rxpa9 >/dev/null
+  mkdir -p "$n/c2"; out=$(cd "$n/c2" && $RX install npb 2>&1)
+  expect "an unsupported ABI is refused" "$out" "with ABI rxpa1"
+  out=$(cd "$n/c2" && RXPIP_ABI=rxpa9 $RX install npb 2>&1); expect "RXPIP_ABI selects another interface level" "$out" "NATIVE/$tag"
+  # missing system prerequisites
+  pubn "$n/src.rxpkg" --name=npc --version=1.0.0 >/dev/null
+  pubn "$n/nat.rxpkg" --name=npc --version=1.0.0 --kind=NATIVE --abi=rxpa1 --runtime-requires="cmd:sh cmd:no-such-tool-xyz lib:nosuchlibxyz" >/dev/null
+  mkdir -p "$n/c3"; out=$(cd "$n/c3" && $RX install npc 2>&1; echo "rc=$?")
+  expect "a missing program is named" "$out" "cmd:no-such-tool-xyz (program not found)"
+  expect "a missing library is named" "$out" "lib:nosuchlibxyz (library not found)"
+  expect_not "a present program is not reported" "$out" "cmd:sh ("
+  expect "missing prerequisites give a non-zero exit" "$out" "rc=1"
+  if [ -z "$(ls "$n/c3")" ]; then ok "nothing is installed when prerequisites are missing"; else bad "nothing is installed when prerequisites are missing" "$(ls "$n/c3")"; fi
+  out=$(cd "$n/c3" && $RX install npc --skip-runtime-check 2>&1); expect "--skip-runtime-check installs anyway" "$out" "installing npc"
+  # a good package: install, check, run, build
+  pubn "$n/src.rxpkg" --name=gtkpkg --version=1.0.0 >/dev/null
+  out=$(pubn "$n/nat.rxpkg" --name=gtkpkg --version=1.0.0 --kind=NATIVE --abi=rxpa1 --runtime-requires="cmd:sh" --build-requires="cmd:sh")
+  expect "the native artifact defaults to this platform" "$out" "PLATFORM: $tag"
+  mkdir -p "$n/c4"; out=$(cd "$n/c4" && $RX install gtkpkg 2>&1)
+  expect "source and native build are installed together" "$out" "SOURCE/crexx + NATIVE/$tag"
+  if [ -f "$n/c4/gtkpkg.crexx" ] && [ ! -e "$n/c4/README.md" ]; then ok "only the source module goes to the install directory"; else bad "only the source module goes to the install directory" "$(ls -a "$n/c4")"; fi
+  local pd; pd=$(find "$RXPIP_HOME" -path "*pkgs/gtkpkg/1.0.0" -type d | head -1)
+  if cmp -s "$pd/providers/libfakeprov.so" "$n/nat/providers/libfakeprov.so" && cmp -s "$pd/libs/libglue.so" "$n/nat/libs/libglue.so" && [ -f "$pd/share/x.xml" ]; then ok "plugin, library and data are in the package directory"; else bad "plugin, library and data are in the package directory" "$(find "$pd" | head)"; fi
+  expect "the record keeps platform and ABI" "$(cat "$n/c4/.rxpip/installed.txt")" "NATIVE: $tag rxpa1"
+  expect "the record keeps the runtime requirements" "$(cat "$n/c4/.rxpip/installed.txt")" "RUNTIME-REQUIRES: cmd:sh"
+  out=$(cd "$n/c4" && $RX check 2>&1); expect "check passes when everything is there" "$out" "all system prerequisites"
+  # run: a logging rxvm stands in for the VM so the hand-over can be seen
+  cat > "$n/cxh/bin/rxvm" <<VMEOF
+#!/bin/sh
+echo "ARGS: \$*" > $n/vm.log
+echo "LD: \$LD_LIBRARY_PATH" >> $n/vm.log
+echo "PKG: \$RXPIP_PKG_GTKPKG" >> $n/vm.log
+exec $(command -v rxvm) "\$@"
+VMEOF
+  chmod +x "$n/cxh/bin/rxvm"
+  printf '/* REQUIRE gtkpkg */\noptions levelb\nimport rxfnsb\nimport gtkpkg\nsay "gtk" gtkversion()\nreturn 0\n' > "$n/app.crexx"
+  out=$(cd "$n" && CREXX_HOME="$n/cxh" $RX run app.crexx 2>&1)
+  expect "run works with a native package" "$out" "gtk 4.10"
+  local vm; vm=$(cat "$n/vm.log")
+  expect "run passes the providers to the VM" "$vm" "--provider-path $pd/providers"
+  expect "run puts the libraries on the search path" "$vm" "LD: $pd/libs"
+  expect "run exports the package directory" "$vm" "PKG: $pd"
+  out=$(cd "$n" && CREXX_HOME="$n/cxh" $RX build app.crexx --output="$n/out" 2>&1)
+  expect "build carries the native files along" "$out" "copied to $n/out/pkgs"
+  expect "build lists the external prerequisites" "$out" "external prerequisites rxpip does not ship (install on the target system): cmd:sh"
+  if [ -f "$n/out/pkgs/gtkpkg/providers/libfakeprov.so" ] && [ -f "$n/out/pkgs/gtkpkg/libs/libglue.so" ] && [ -f "$n/out/pkgs/gtkpkg/share/x.xml" ]; then ok "build output contains plugin, library and data"; else bad "build output contains plugin, library and data" "$(find "$n/out" -type f)"; fi
+  out=$(cd "$n/out" && CREXX_HOME="$n/cxh" ./run.sh one 2>&1); expect "the built run script starts the program" "$out" "gtk 4.10"
+  vm=$(cat "$n/vm.log")
+  expect "the run script passes the providers" "$vm" "--provider-path $n/out/pkgs/gtkpkg/providers"
+  expect "the run script forwards arguments" "$vm" "-a one"
+  expect "the run script sets the library path" "$vm" "LD: $n/out/pkgs/gtkpkg/libs"
+  # a prerequisite that disappears after the install is caught at run time
+  printf 'options levelb\nnamespace gonepkg\nimport rxfnsb\n' > "$n/src/gonepkg.crexx"
+  tar czf "$n/gone.rxpkg" -C "$n/src" gonepkg.crexx
+  pubn "$n/gone.rxpkg" --name=gtkgone --version=1.0.0 >/dev/null
+  pubn "$n/nat.rxpkg" --name=gtkgone --version=1.0.0 --kind=NATIVE --abi=rxpa1 --runtime-requires="cmd:no-such-tool-xyz" >/dev/null
+  (cd "$n/c4" && $RX install gtkgone --global --skip-runtime-check >/dev/null 2>&1)
+  printf '/* REQUIRE gtkgone */\noptions levelb\nimport rxfnsb\nsay "x"\nreturn 0\n' > "$n/app2.crexx"
+  out=$(cd "$n" && $RX run app2.crexx 2>&1)
+  expect "run refuses when a prerequisite is missing" "$out" "'gtkgone' needs system prerequisites: cmd:no-such-tool-xyz"
+}
+
 run_client() {
   local c=$1 RX plat d
   RX=$(client_cmd "$c")
@@ -215,6 +299,34 @@ run_client() {
     echo "  (minisign not installed: signed-release tests skipped)"
   fi
   out=$($RX admin lock nobody 2>&1);            expect "admin lock of an unknown user" "$out" "NO_SUCH_USER"
+  # ---- package directories (subdirectories inside a package) ----
+  local ext top
+  case $c in netrexx) ext=nrx;; crexx) ext=crexx;; *) ext=rexx;; esac
+  local td=$WORK/tree_$c; mkdir -p "$td/p/doc" "$td/p/share/data"
+  case $c in
+    netrexx) printf 'class TreeMod%s\n  method hi static returns Rexx\n    return "hi"\n' "$c" > "$td/p/TreeMod$c.nrx"; top=TreeMod$c.nrx ;;
+    crexx)   printf 'options levelb\nnamespace treemod\nimport rxfnsb\n' > "$td/p/treemod.crexx"; top=treemod.crexx ;;
+    *)       printf '/* tree */\nTreeHi: procedure\n  return "hi"\n' > "$td/p/treehi.rexx"; top=treehi.rexx ;;
+  esac
+  echo "readme of $c" > "$td/p/doc/README.md"
+  head -c 5000 /dev/urandom > "$td/p/share/data/blob.bin"
+  tar czf "$td/tree.rxpkg" -C "$td/p" "$top" doc share
+  out=$($RX publish "$td/tree.rxpkg" --name=t1$c --version=1.0.0 --platform=$plat 2>&1)
+  expect "a package with subdirectories is published" "$out" "published"
+  local tcwd=$WORK/treecwd_$c; mkdir -p "$tcwd"
+  out=$(cd "$tcwd" && $RX install t1$c 2>&1); expect "it installs" "$out" "installing t1$c"
+  [ -f "$tcwd/$top" ] && ok "the top-level file lands in the install directory" || bad "the top-level file lands in the install directory" "$(ls -a "$tcwd")"
+  if [ -e "$tcwd/README.md" ] || [ -e "$tcwd/doc" ] || [ -e "$tcwd/blob.bin" ]; then bad "nested files are not flattened into the install directory" "$(ls -a "$tcwd")"; else ok "nested files are not flattened into the install directory"; fi
+  local nd; nd=$(find "$RXPIP_HOME" -path "*pkgs/t1$c/1.0.0/doc/README.md" | head -1)
+  [ -n "$nd" ] && ok "the package directory keeps the tree" || bad "the package directory keeps the tree" "$(find "$RXPIP_HOME" -path "*t1$c*" | head)"
+  local bd; bd=$(find "$RXPIP_HOME" -path "*pkgs/t1$c/1.0.0/share/data/blob.bin" | head -1)
+  if [ -n "$bd" ] && cmp -s "$bd" "$td/p/share/data/blob.bin"; then ok "a binary data file survives byte-identical"; else bad "a binary data file survives byte-identical"; fi
+  out=$(cd "$tcwd" && $RX uninstall t1$c 2>&1); expect "it uninstalls" "$out" "removed t1$c"
+  if [ -f "$tcwd/$top" ]; then bad "uninstall removes the top-level file"; else ok "uninstall removes the top-level file"; fi
+
+  # ---- native artifacts (cREXX client) ----
+  if [ "$c" = crexx ]; then native_tests "$RX"; fi
+
   $RX logout >/dev/null 2>&1
   out=$($RX whoami 2>&1);                       expect "whoami after logout" "$out" "not logged in"
   ls /tmp 2>/dev/null | grep -q rxpip_hdr_ && bad "no token header file left behind" || ok "no token header file left behind"

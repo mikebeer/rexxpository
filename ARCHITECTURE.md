@@ -20,8 +20,10 @@ REXX's fragmentation *less* painful, not more. So instead:
 
   | Field | Meaning |
   |---|---|
-  | `KIND` | `SOURCE` — portable classic-REXX source (the default, and the only kind most packages will ever need), or `BYTECODE` — a precompiled artifact for one specific runtime. |
-  | `PLATFORM` | `any` for `SOURCE` artifacts, or a specific tag like `crexx-linux-x86_64` for `BYTECODE`. |
+  | `KIND` | `SOURCE` — portable classic-REXX source (the default, and the only kind most packages will ever need), `BYTECODE` — a precompiled artifact for one specific runtime, or `NATIVE` — platform-specific plugins, shared libraries and data (see "Native artifacts" below). |
+  | `PLATFORM` | `any` for `SOURCE` artifacts, or a specific tag like `crexx-linux-x86_64` for `BYTECODE` and `NATIVE` (required there). |
+  | `ABI` | optional interface level of a `NATIVE` artifact (`rxpa1`). |
+  | `RUNTIME-REQUIRES` / `BUILD-REQUIRES` | optional system prerequisites (`pkg:NAME[>=VER]`, `lib:NAME`, `cmd:NAME`), runtime ones kept apart from build tools. |
 
   A publisher ships a `SOURCE/any` artifact by default. If a specific
   runtime later benefits from a precompiled form (once, say, cREXX's own
@@ -382,8 +384,10 @@ exactly what to check first.
   a per-package list; any owner may add or remove owners, never the last.
 - **Uploads.** `RXPIP_MAX_UPLOAD` (default 5 MiB) is enforced before the
   body is read. Archives are validated before anything is kept: at most
-  200 members, regular files only (no symlinks, hardlinks, devices or
-  directories), flat safe file names. Uploads are staged in `repo/.staging`
+  500 members, regular files and plain directories only (no symlinks,
+  hardlinks or devices), every path component a safe name (no leading dot,
+  so no `..`, no absolute paths), at most 6 levels and 200 characters
+  (client release archives stay flat). Uploads are staged in `repo/.staging`
   and moved into place atomically; a rejected upload leaves no trace and
   does not claim the name. Releases are immutable (409 on re-publish).
 - **Metadata.** Free-text fields are length-capped and may not contain
@@ -484,7 +488,7 @@ Client releases: `repo/.clients/<kind>/<ver>/{files,MANIFEST}` and
 `<kind>/LATEST` (only moves forward). `CLIENT` (public GET, works in closed mode)
 returns the manifest (`VERSION LATEST MIN FILES`) or one file named in the
 manifest. `ADMINCLIENT` (POST, admin) takes a tar.gz validated by
-`ValidateArchive` (flat safe names) and refuses an existing version.
+`ValidateArchive` (flat) and refuses an existing version.
 
 The administrator role is a list in `.auth/admins`; `AuthenticateAdmin` = normal
 token auth + membership (403 otherwise). Admin HTTP actions: `ADMINSTATS`,
@@ -498,6 +502,35 @@ launcher recompiles. The client finds its own folder from `RXPIP_CLIENT_DIR`
 (set by the launchers; Regina falls back to `parse source`). A once-a-day check
 (stamp `clientcheck.txt`) prints a hint on stderr (cREXX: stdout, not before
 `run`).
+
+### Package trees and native artifacts
+
+`ValidateArchive` returns two lists: `FILES` (the top-level files, which
+clients copy into the shared `lib/` and which older clients rely on) and
+`TREE` (every file with its relative path). `ARTIFACTS` prints both, plus
+`ABI`, `RUNTIME-REQUIRES` and `BUILD-REQUIRES` when present; they are
+stored in `ARTIFACTS.META` per artifact. Clients extract the whole archive
+into `<home>/<lang>/pkgs/<name>/<version>/` and flatten only `FILES`, so
+nested files never collide between packages.
+
+A `NATIVE` artifact must name its platform (`crexx-<os>-<arch>`, the tag
+`rxpip platform` prints); the ABI and prerequisite lists are validated
+strictly (the clients pass them to the system), prerequisites being
+`pkg:` (pkg-config, with `>=` version), `lib:` (shared library) or `cmd:`
+(program). The cREXX client installs the `SOURCE/crexx` artifact together
+with the native artifact whose platform and ABI it supports
+(`RXPIP_ABI` / config `NATIVE_ABI`, default `rxpa1`); if the version has
+native builds but none fits, or a runtime prerequisite is missing, it
+refuses with a message and a non-zero exit, installing nothing
+(`--no-native`, `--skip-runtime-check` override). Plugin directories by
+convention: `providers/` -> `rxvm --provider-path`, `libs/` -> the library
+search variable (`LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH` or `PATH`),
+`share/` and the rest -> reachable through `RXPIP_PKG_<NAME>`. `run`
+passes all of this to the VM; `build` copies the packages that carry them
+to `<out>/pkgs/` and writes `run.sh`/`run.bat`, and lists the external
+prerequisites it cannot ship. The Regina, ooRexx and NetRexx clients keep
+installing source only: they ignore `NATIVE` artifacts but handle package
+trees.
 
 ### Removing the Internet mark from what rxpip downloads
 
