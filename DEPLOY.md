@@ -271,7 +271,7 @@ Client releases live in `repo/.clients/<kind>/<version>/` (kinds: `regina`,
 checkout, e.g. `rxpip admin client-publish regina --version=1.3.0 --min=1.0.0
 client/rxpip.rexx` (and again with `oorexx`; `client/netrexx/Rxpip.nrx` for
 `netrexx`, `client/crexx/rxpip.crexx` for `crexx`). The public action `CLIENT`
-serves them, also in a closed repository. `tools/publish-clients.sh [--min=V]` does all four kinds at once (version taken from
+serves them, also in a closed repository. `tools/publish-clients.sh [--min=V]` (Linux/macOS) or `regina -a tools/publish-clients.rexx [--min=V]` (Windows too) does all four kinds at once (version taken from
 each client's `ClientVersion`, launchers included); the releases are listed on the public
 page `?action=DOWNLOADS` (linked as "get the client" on every page). Release files can carry a minisign signature: list `file` and `file.minisig` together in `client-publish`; the page then links the signature and shows the key (default: the project key, overridable with `RXPIP_MINISIGN_KEY`). Remember to raise `ClientVersion` in
 the client source before releasing. Back up `.stats/` and `.clients/` with the rest of `repo/`.
