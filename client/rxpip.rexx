@@ -510,7 +510,11 @@ CmdPath: procedure expose home cfg.
   say 'Installed package files are plain files in this directory. Put it on PATH once'
   say 'and Regina (or ooRexx) finds them from any script, without rxpip run:'
   say ''
-  if IsWindows() then do
+  if IsOS2() then do
+    wl = translate(lib, '\', '/')
+    say '  SET PATH=%PATH%;' || wl || '      (add to the PATH line in CONFIG.SYS)'
+  end
+  else if IsWindows() then do
     wl = translate(lib, '\', '/')
     say '  setx PATH "%PATH%;' || wl || '"'
   end
@@ -731,7 +735,25 @@ CmdBuild: procedure expose home cfg.
    on either platform. */
 MergeScript: procedure
   parse arg srcfile, home, outfile
-  if IsWindows() then do
+  if IsOS2() then do      /* no parenthesised command groups: copy in REXX */
+    call LoadUtil
+    call DelFile outfile
+    do while lines(srcfile) > 0
+      call lineout outfile, linein(srcfile)
+    end
+    call stream srcfile, 'c', 'close'
+    call lineout outfile, ''
+    call lineout outfile, 'exit'
+    call SysFileTree translate(home,'\','/') || '\lib\*', 'lf.', 'FO'
+    do i = 1 to lf.0
+      do while lines(lf.i) > 0
+        call lineout outfile, linein(lf.i)
+      end
+      call stream lf.i, 'c', 'close'
+    end
+    call stream outfile, 'c', 'close'
+  end
+  else if IsWindows() then do
     wsrc = translate(srcfile,'\','/')
     wlib = translate(home,'\','/') || '\lib\*'
     wout = translate(outfile,'\','/')
@@ -1734,7 +1756,11 @@ ShowResponse: procedure
    as the universal fallback (see server's artifact-model note). */
 PlatformTag: procedure expose cfg.
   interp = Interpreter()
-  if IsWindows() then do
+  if IsOS2() then do
+    os = 'os2'
+    arch = 'x86'
+  end
+  else if IsWindows() then do
     /* no shell-out needed -- Windows sets these env vars itself */
     os = 'windows'
     arch = translate(value('PROCESSOR_ARCHITECTURE',,'ENVIRONMENT'))
@@ -1958,10 +1984,26 @@ IsWindows: procedure
   if value('COMSPEC',,'ENVIRONMENT') \= '' then return 1
   return 0
 
+/* OS/2 (and ArcaOS, ROSE): IsWindows() is true there too (COMSPEC, CMD.EXE,
+   backslashes); the helpers below take OS/2 branches where OS/2's CMD differs
+   from Windows' (no /Y, /Q, /D, no parenthesised groups, MKDIR one level) */
+IsOS2: procedure
+  parse source os .
+  return (translate(os) = 'OS/2')
+
+/* RexxUtil, for the OS/2 file helpers */
+LoadUtil: procedure
+  if RxFuncQuery('SysLoadFuncs') then do
+    call RxFuncAdd 'SysLoadFuncs', 'RexxUtil', 'SysLoadFuncs'
+    call SysLoadFuncs
+  end
+  return
+
 TempDir: procedure
   if IsWindows() then do
     t = value('TEMP',,'ENVIRONMENT')
     if t = '' then t = value('TMP',,'ENVIRONMENT')
+    if t = '' & IsOS2() then t = left(directory(), 2)   /* the current drive's root */
     if t = '' then t = 'C:/Windows/Temp'
     return translate(t, '/', '\')
   end
@@ -1973,32 +2015,49 @@ NullSink: procedure
 
 DelFile: procedure
   parse arg f
-  if IsWindows() then 'del /f /q "' || translate(f,'\','/') || '" >nul 2>nul'
+  if IsOS2() then 'del "' || translate(f,'\','/') || '" >nul 2>nul'
+  else if IsWindows() then 'del /f /q "' || translate(f,'\','/') || '" >nul 2>nul'
   else 'rm -f "' || f || '"'
   return
 
 DelTree: procedure
   parse arg d
-  if IsWindows() then 'rmdir /s /q "' || translate(d,'\','/') || '" >nul 2>nul'
+  if IsOS2() then call OS2DelTree translate(d,'\','/')
+  else if IsWindows() then 'rmdir /s /q "' || translate(d,'\','/') || '" >nul 2>nul'
   else 'rm -rf "' || d || '"'
   return
 
 MoveFile: procedure
   parse arg src, dst
-  if IsWindows() then 'move /y "' || translate(src,'\','/') || '" "' || translate(dst,'\','/') || '" >nul'
+  if IsOS2() then do      /* OS/2's MOVE neither replaces nor crosses drives */
+    call CopyFile src, dst
+    call DelFile src
+  end
+  else if IsWindows() then 'move /y "' || translate(src,'\','/') || '" "' || translate(dst,'\','/') || '" >nul'
   else 'mv "' || src || '" "' || dst || '"'
   return
 
 CopyFile: procedure
   parse arg src, dst
-  if IsWindows() then 'copy /y "' || translate(src,'\','/') || '" "' || translate(dst,'\','/') || '" >nul' ,
+  if IsOS2() then 'copy "' || translate(src,'\','/') || '" "' || translate(dst,'\','/') || '" >nul 2>nul'
+  else if IsWindows() then 'copy /y "' || translate(src,'\','/') || '" "' || translate(dst,'\','/') || '" >nul' ,
                        '2>nul'
   else 'cp "' || src || '" "' || dst || '"' '2>/dev/null'
   return
 
 EnsureDir: procedure
   parse arg d
-  if IsWindows() then 'mkdir "' || translate(d,'\','/') || '" 2>nul'
+  if IsOS2() then do      /* MKDIR makes one level */
+    w = translate(d,'\','/')
+    p = 0
+    do forever
+      p = pos('\', w, p + 1)
+      if p = 0 then leave
+      if p > 1 & substr(w, p - 1, 1) \= ':' then 'mkdir "' || left(w, p - 1) || '" >nul 2>nul'
+    end
+    'mkdir "' || strip(w, 'T', '\') || '" >nul 2>nul'
+  end
+  else if IsWindows() then 'mkdir "' || translate(d,'\','/') || '" 2>nul'
   else 'mkdir -p "' || d || '"'
   return
 
@@ -2056,9 +2115,30 @@ SplitQuoted: procedure
 
 RunInDir: procedure
   parse arg dir, cmdline
+  if IsOS2() then do      /* no CD /D: change the drive, then the directory */
+    wd = translate(dir,'\','/')
+    if substr(wd, 2, 1) = ':' then 'cd "' || wd || '" && ' || left(wd, 2) || ' && ' || cmdline
+    else 'cd "' || wd || '" && ' || cmdline
+    return rc
+  end
   if IsWindows() then 'cd /d "' || translate(dir,'\','/') || '" && ' || cmdline
   else 'cd "' || dir || '" && ' || cmdline
   return rc
+
+/* delete a directory tree with RexxUtil (OS/2's RMDIR has no /S) */
+OS2DelTree: procedure
+  parse arg d
+  call LoadUtil
+  call SysFileTree d || '\*', 'f.', 'FSO'
+  do i = 1 to f.0
+    call SysFileDelete f.i
+  end
+  call SysFileTree d || '\*', 's.', 'DSO'
+  do i = s.0 to 1 by -1      /* deepest first */
+    call SysRmDir s.i
+  end
+  call SysRmDir d
+  return
 
 Bomb:
   if value("RXPIP_DEBUG",,"ENVIRONMENT") \= "" then say "DEBUG:" sigl sourceline(sigl)
