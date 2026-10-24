@@ -94,6 +94,8 @@ class Rxpip
         when cmd = 'WHOAMI'    then cmdWhoami
         when cmd = 'TOKEN'     then cmdToken(rest)
         when cmd = 'OWNER'     then cmdOwner(rest)
+        when cmd = 'LIKE'      then cmdLike(cmd, rest)
+        when cmd = 'UNLIKE'    then cmdLike(cmd, rest)
         when cmd = 'VISIBILITY' then cmdVisibility(rest)
         when cmd = 'READER'    then cmdReader(rest)
         when cmd = 'HELP'      then cmdHelp
@@ -118,7 +120,8 @@ class Rxpip
     say '  list                        list installed packages'
     say '  find [dir...] [--sync]      find installs under dirs (default .), show duplicates/older copies;'
     say '                              --sync brings older copies up to the newest version found'
-    say '  search <term>               search the repository'
+    say '  search [--sort=likes] <term>   search the repository (--sort=likes: most recommended first)'
+    say '  like <pkg> | unlike <pkg>   recommend a package (needs a login; not your own)'
     say '  show <name>                 show repository details for a package'
     say '  freeze                      print installed packages as name==version'
     say '  scan <file.nrx>             install packages named in REQUIRE comments'
@@ -450,11 +453,24 @@ class Rxpip
 
   method cmdSearch(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
     term = ''
+    sortq = ''
     loop i = 0 to a.length - 1
-      term = term a[i]
+      if Rexx(a[i]).upper = '--SORT=LIKES' then sortq = '&sort=likes'
+      else term = term a[i]
     end
     term = term.strip
-    printStanzas(serverGet('SEARCH', 'q='urlEnc(term)))
+    printStanzas(serverGet('SEARCH', 'q='urlEnc(term)''sortq))
+
+  /* rxpip like <pkg> | unlike <pkg> -- recommend a package (one per user) */
+  method cmdLike(what=Rexx, a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
+    pkg = argAt(a, 0)
+    if pkg = '' then do
+      say 'usage: rxpip like <package>   |   rxpip unlike <package>'
+      exit 1
+    end
+    hdrs = ArrayList()
+    hdrs.add('X-Rxpip-Name: 'pkg)
+    exit showResponse(authCall(what, hdrs))
 
   method cmdShow(a=String[]) static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
     if a.length < 1 then do
@@ -889,7 +905,7 @@ class Rxpip
      client source; the launcher recompiles it on the next start.
      ===================================================================== */
   method clientVersion static returns Rexx
-    return '1.4.0'
+    return '1.5.0'
 
   method clientHeader static returns Rexx
     os = Rexx(System.getProperty('os.name')).lower.word(1)

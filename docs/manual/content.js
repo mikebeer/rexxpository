@@ -182,6 +182,7 @@ module.exports = function (D) {
     'REQUIRES: strutils>=1.0.0',
   ], 'Searching and showing a package');
   D.p('`search` looks for the term in package names and summaries (without regard to case) and lists the latest version of each match. `search` with no term lists everything. `show <name>` prints the details of one package. You can do the same in a web browser; see Chapter 6.');
+  D.p('**Recommending packages.** `rxpip like <name>` recommends a public package (one recommendation per user; not your own packages) and `rxpip unlike <name>` takes it back. `rxpip search --sort=likes` lists the most recommended first, and `show` and the web pages display the count.');
   D.h2('Installing and removing');
   D.table(['Command', 'Effect'], [
     ['`rxpip install <name>`', 'Install the latest version of a package and everything it requires'],
@@ -351,6 +352,7 @@ module.exports = function (D) {
   // ------------------------------------------------------------ Chapter 5
   D.chapter('Accounts, Tokens and Owners');
   D.p('Anyone can search, show, install and download. Publishing, and changing who owns a package, requires an account. Accounts are **approved by the repository administrator**: every user who can publish is somebody whose code other people will run, and an open sign-up on a code repository is an easy way to distribute malware.');
+  D.p('**Virus scanning.** Every upload is scanned by ClamAV before the repository keeps it. An infected upload is rejected (`VIRUS_FOUND`), and if the scanner is not available the upload is refused (`SCANNER_UNAVAILABLE`) rather than accepted unchecked; try again later or tell the operator. The whole repository is rescanned weekly.');
   D.h2('Getting an account');
   D.p('There are two ways to get one. **Ask on the web page:** open `<repository address>?action=SIGNUP`, enter the name you want, your e-mail address and your location, and send the form. The administrator receives a mail, checks the request and approves or rejects it. On approval you receive a mail with a single-use invitation code at the address you gave. **Or** the operator creates an invitation and gives it to you directly (Chapter 8). Either way you redeem the code once:');
   D.code([

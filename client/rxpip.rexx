@@ -120,6 +120,7 @@ select
   when cmd = 'WHOAMI'    then call CmdWhoami
   when cmd = 'TOKEN'     then call CmdToken rest
   when cmd = 'OWNER'     then call CmdOwner rest
+  when cmd = 'LIKE' | cmd = 'UNLIKE' then call CmdLike cmd, rest
   when cmd = 'VISIBILITY' then call CmdVisibility rest
   when cmd = 'READER'    then call CmdReader rest
   when cmd = 'HELP'      then call CmdHelp
@@ -151,7 +152,8 @@ CmdHelp:
   say '  --target=DIR, -t DIR       use directory DIR'
   say '  --force                    overwrite files that rxpip did not install'
   say ''
-  say '  search <term>               search the repository'
+  say '  search [--sort=likes] <term>   search the repository (--sort=likes: most recommended first)'
+  say '  like <pkg> | unlike <pkg>   recommend a package (needs a login; not your own)'
   say '  show <name>                 show repository details for a package'
   say '  freeze                      print installed packages as name==version'
   say '  scan <file.rexx>            install packages named in /* REQUIRE */'
@@ -560,15 +562,21 @@ CmdList: procedure expose home cfg.
 CmdSearch: procedure expose cfg.
   parse arg rest
   /* rejoin every word/argument the user typed into one natural search
-     phrase, regardless of how many separate shell words it was */
+     phrase, regardless of how many separate shell words it was;
+     --sort=likes lists the most recommended first */
   term = ''
+  sortq = ''
   do while rest \= ''
     parse var rest one '01'x rest
     if one = '' then iterate
+    if translate(one) = '--SORT=LIKES' then do
+      sortq = '&sort=likes'
+      iterate
+    end
     if term = '' then term = one
     else term = term || ' ' || one
   end
-  resp = ServerGet(cfg.REPO_URL, 'SEARCH', 'q=' || UrlEncode(term))
+  resp = ServerGet(cfg.REPO_URL, 'SEARCH', 'q=' || UrlEncode(term) || sortq)
   call PrintStanzas resp
   return
 
@@ -984,6 +992,27 @@ CmdOwner: procedure expose home cfg.
   exit rc
   return
 
+/* rxpip like <pkg> | rxpip unlike <pkg> -- recommend a package (one per user) */
+CmdLike: procedure expose home cfg.
+  parse arg what, rest
+  parse var rest pkg '01'x .
+  repo = GetConfigValue(home, 'REPO_URL')
+  if pkg = '' then do
+    say 'usage: rxpip like <package>   |   rxpip unlike <package>'
+    exit 1
+    return
+  end
+  t = ResolveToken(home, repo, '')
+  if t = '' then do
+    say 'not logged in (rxpip login --token=T)'
+    exit 1
+    return
+  end
+  out = ServerPost(repo, what, '', 'X-Rxpip-Name: ' || pkg, 'X-Rxpip-Token: ' || t, '')
+  rc = ShowResponse(out)
+  exit rc
+  return
+
 /* rxpip visibility <pkg> [public|private]  -- owners; without a value, show it */
 CmdVisibility: procedure expose home cfg.
   parse arg pkg '01'x val '01'x .
@@ -1308,7 +1337,7 @@ RecordInstalled: procedure
    ======================================================================= */
 
 ClientVersion: procedure
-  return '1.4.0'
+  return '1.5.0'
 
 ClientKind: procedure
   if IsOoRexx() then return 'oorexx'

@@ -16,6 +16,7 @@ mkdir -p "$REPO"
 unset JAVA_TOOL_OPTIONS
 cleanup() { [ -n "${HPID:-}" ] && kill "$HPID" 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT
+export RXPIP_SCANNER=off   # no virus scanner in the test environment
 python3 "$ROOT/tests/cgi_harness.py" --port "$PORT" --script "$ROOT/server/rxpip_server.rexx" --repo "$REPO" &
 HPID=$!
 for _ in $(seq 1 50); do curl -s "$BASE?action=PING" 2>/dev/null | grep -q "STATUS: OK" && break; sleep 0.1; done
@@ -299,6 +300,17 @@ run_client() {
     echo "  (minisign not installed: signed-release tests skipped)"
   fi
   out=$($RX admin lock nobody 2>&1);            expect "admin lock of an unknown user" "$out" "NO_SUCH_USER"
+  # ---- likes (recommendations) ----
+  out=$($RX like m1$c 2>&1);                    expect "you cannot recommend your own package" "$out" "OWN_PACKAGE"
+  out=$($RX like 2>&1);                         expect "like without a name shows usage" "$out" "usage: rxpip like"
+  local liker; liker=$(adm adduser liker$c | sed 's/.*: //')
+  out=$(RXPIP_TOKEN=$liker $RX like m1$c 2>&1); expect "another user recommends it" "$out" "LIKES: 1"
+  expect "and is told so" "$out" "LIKED: yes"
+  out=$($RX show m1$c 2>&1);                    expect "show displays the count" "$out" "LIKES: 1"
+  out=$($RX search m1$c 2>&1);                  expect "search displays the count" "$out" "LIKES: 1"
+  out=$($RX search --sort=likes m1$c 2>&1);     expect "search --sort=likes works" "$out" "m1$c"
+  out=$(RXPIP_TOKEN=$liker $RX unlike m1$c 2>&1); expect "unlike takes it back" "$out" "LIKES: 0"
+
   # ---- package directories (subdirectories inside a package) ----
   local ext top
   case $c in netrexx) ext=nrx;; crexx) ext=crexx;; *) ext=rexx;; esac

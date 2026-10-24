@@ -532,6 +532,21 @@ prerequisites it cannot ship. The Regina, ooRexx and NetRexx clients keep
 installing source only: they ignore `NATIVE` artifacts but handle package
 trees.
 
+### Virus scanning and recommendations
+
+Uploads are scanned (`ScanGate`, after archive validation and before the
+package name is claimed) by `RXPIP_SCANNER` (default `clamdscan`). The gate
+fails closed: exit 1 = infected -> 422, anything else non-zero -> 503.
+`RXPIP_SCANNER=off` exists for tests only. `tools/scan-repo.sh` rescans the
+repository from cron.
+
+`LIKE`/`UNLIKE` record one recommendation per user per package in
+`repo/.auth/likes/<pkg>.likes` (user names, never served). Only public
+packages can be liked, never your own. Counts appear as `LIKES:` in
+LIST/SEARCH/INFO, `LIKED:` tells a logged-in viewer their own state, and
+`sort=likes` orders results. Clients: `rxpip like|unlike <pkg>`,
+`rxpip search --sort=likes`.
+
 ### Removing the Internet mark from what rxpip downloads
 
 `Unblock(path)` (Regina/ooRexx; `unblock` in NetRexx/cREXX) removes the

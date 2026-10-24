@@ -70,6 +70,7 @@ Once configured (either platform):
 ```bash
 # use a package manager
 rxpip search math
+rxpip like math     # recommend; search --sort=likes ranks by it
 rxpip show mathutils
 rxpip install mathutils
 rxpip install greetutils==1.0.0

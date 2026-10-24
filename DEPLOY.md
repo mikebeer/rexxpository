@@ -151,6 +151,44 @@ curl -s "https://www.rexxpository.org/cgi-bin/rxpip_server.rexx?action=PING"
 Open `https://www.rexxpository.org/` in a browser: the (empty) package
 index should appear.
 
+## 7a. Virus scanner (ClamAV) -- install this BEFORE the new server script
+
+Every upload (packages and client releases) is scanned before it is kept.
+If the scanner is missing or broken the upload is **refused** (HTTP 503,
+`SCANNER_UNAVAILABLE`); an infected upload gets HTTP 422 `VIRUS_FOUND`.
+So install and start ClamAV first, or temporarily set `SetEnv RXPIP_SCANNER off`.
+
+```bash
+sudo dnf install -y epel-release
+sudo dnf install -y clamav clamd clamav-update
+sudo freshclam                                  # first signature download
+sudo sed -i 's/^Example/#Example/' /etc/clamd.d/scan.conf
+sudo grep -q '^LocalSocket ' /etc/clamd.d/scan.conf || \
+  echo 'LocalSocket /run/clamd.scan/clamd.sock' | sudo tee -a /etc/clamd.d/scan.conf
+sudo systemctl enable --now clamd@scan clamav-freshclam
+sudo setsebool -P antivirus_can_scan_system 1
+```
+
+The default command is `clamdscan --no-summary --fdpass` (the daemon keeps
+the signatures in memory, so a scan takes milliseconds). Override it with
+`SetEnv RXPIP_SCANNER "<command>"` in both virtual hosts; the file name is
+appended and the command must exit 0 (clean), 1 (infected) -- anything else
+counts as "scanner unavailable". Check it:
+
+```bash
+printf '%s' 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' > /tmp/eicar.com
+clamdscan --fdpass /tmp/eicar.com; echo $?       # FOUND, 1
+```
+
+Weekly rescan of the whole repository (new signatures can catch old uploads):
+
+```bash
+sudo install -m 755 tools/scan-repo.sh /usr/local/bin/rxpip-scan-repo
+echo '17 3 * * 0 root MAILTO=you@example.org /usr/local/bin/rxpip-scan-repo' | sudo tee /etc/cron.d/rxpip-scan
+```
+
+Rejections are logged as `SCANREJ` / `SCANDOWN` in `repo/.stats/`.
+
 ## 8. Accounts: how people get to publish
 
 Accounts are **invite-only**: an open sign-up on a code repository is a

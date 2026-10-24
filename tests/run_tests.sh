@@ -28,6 +28,18 @@ chmod +x "$WORK/sendmail.sh"
 export RXPIP_ADMIN_EMAIL=admin@example.org RXPIP_SENDMAIL="$WORK/sendmail.sh" \
        RXPIP_PUBLIC_URL="http://127.0.0.1:$PORT/cgi-bin/rxpip_server.rexx" RXPIP_MAIL_FROM=rxpip@example.org
 
+# fake virus scanner with the ClamAV exit codes: 0 clean, 1 infected, 2 broken
+cat > "$WORK/fakescan.sh" <<SC
+#!/bin/sh
+[ -e "$WORK/scanner_down" ] && { echo "ERROR: Could not connect to clamd"; exit 2; }
+if tar xzOf "\$1" 2>/dev/null | grep -aq 'EICAR-STANDARD-ANTIVIRUS-TEST-FILE'; then
+  echo "\$1: Eicar-Test-Signature FOUND"; exit 1
+fi
+exit 0
+SC
+chmod +x "$WORK/fakescan.sh"
+export RXPIP_SCANNER="$WORK/fakescan.sh"
+
 python3 "$ROOT/tests/cgi_harness.py" --port "$PORT" \
   --script "$ROOT/server/rxpip_server.rexx" --repo "$REPO" &
 HPID=$!
@@ -697,6 +709,88 @@ cmp -s "$WORK/native_ok.rxpkg" "$WORK/nat_dl.rxpkg" && ok "the native artifact d
 # client releases stay flat
 c=$(curl -s -X POST -H "X-Rxpip-Token: $TOKA" -H "X-Rxpip-Kind: regina" -H "X-Rxpip-Version: 1.5.0" --data-binary @"$WORK/tree_ok.rxpkg" "$BASE?action=ADMINCLIENT")
 expect "client releases must stay flat" "$c" "BAD_ARCHIVE"
+
+# ============================================================================
+section "virus scanner"
+eicar='X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*'
+mkdir -p "$WORK/vs/top" "$WORK/vs/deep/sub"
+echo "say 1" > "$WORK/vs/top/a.rexx"; printf '%s\n' "$eicar" > "$WORK/vs/top/eicar.rexx"
+echo "say 1" > "$WORK/vs/deep/a.rexx"; printf '%s\n' "$eicar" > "$WORK/vs/deep/sub/b.rexx"
+tar czf "$WORK/vs_top.rxpkg" -C "$WORK/vs/top" a.rexx eicar.rexx
+tar czf "$WORK/vs_deep.rxpkg" -C "$WORK/vs/deep" a.rexx sub
+tar czf "$WORK/vs_clean.rxpkg" -C "$WORK/vs/top" a.rexx
+pub scanpkg 1.0.0 "$TOKA" "$WORK/vs_top.rxpkg"
+expect "an infected upload is refused" "$BODY" "VIRUS_FOUND"
+expect "the signature name is reported" "$BODY" "Eicar-Test-Signature"
+[ "$CODE" = 422 ] && ok "infected upload gives HTTP 422" || bad "infected upload gives HTTP 422" "got $CODE"
+pub scanpkg 1.0.0 "$TOKA" "$WORK/vs_deep.rxpkg"
+expect "an infected file in a subdirectory is found too" "$BODY" "VIRUS_FOUND"
+[ -e "$REPO/scanpkg" ] && bad "a refused upload leaves no package behind" || ok "a refused upload leaves no package behind"
+[ -e "$REPO/.auth/owners/scanpkg.owners" ] && bad "a refused upload does not claim the name" || ok "a refused upload does not claim the name"
+[ -z "$(find "$REPO/.staging" -type f 2>/dev/null)" ] && ok "the staging area is empty after a refused upload" || bad "the staging area is empty after a refused upload" "$(find "$REPO/.staging" -type f)"
+expect "the rejection is logged for the administrator" "$(cat "$REPO"/.stats/*.log)" "|SCANREJ|scanpkg|1.0.0|Eicar-Test-Signature|"
+touch "$WORK/scanner_down"
+pub scanpkg 1.0.0 "$TOKA" "$WORK/vs_clean.rxpkg"
+expect "a broken scanner refuses even a clean upload" "$BODY" "SCANNER_UNAVAILABLE"
+[ "$CODE" = 503 ] && ok "scanner trouble gives HTTP 503" || bad "scanner trouble gives HTTP 503" "got $CODE"
+expect "the reason is shown" "$BODY" "Could not connect to clamd"
+[ -e "$REPO/scanpkg" ] && bad "nothing is kept while the scanner is down" || ok "nothing is kept while the scanner is down"
+rm -f "$WORK/scanner_down"
+pub scanpkg 1.0.0 "$TOKA" "$WORK/vs_clean.rxpkg"
+expect "a clean upload is accepted again" "$BODY" "STATUS: OK"
+c=$(curl -s -X POST -H "X-Rxpip-Token: $TOKA" -H "X-Rxpip-Kind: regina" -H "X-Rxpip-Version: 7.7.7" --data-binary @"$WORK/vs_top.rxpkg" "$BASE?action=ADMINCLIENT")
+expect "a client release is scanned too" "$c" "VIRUS_FOUND"
+# a scanner command that does not exist: everything is refused
+SPORT=$((PORT+2))
+RXPIP_SCANNER=/nonexistent/scanner python3 "$ROOT/tests/cgi_harness.py" --port "$SPORT" \
+  --script "$ROOT/server/rxpip_server.rexx" --repo "$REPO" &
+SPID=$!
+for _ in $(seq 1 50); do curl -s "http://127.0.0.1:$SPORT/cgi-bin/rxpip_server.rexx?action=PING" 2>/dev/null | grep -q "STATUS: OK" && break; sleep 0.1; done
+c=$(curl -s -X POST -H "X-Rxpip-Name: noscanner" -H "X-Rxpip-Version: 1.0.0" -H "X-Rxpip-Token: $TOKA" --data-binary @"$WORK/vs_clean.rxpkg" "http://127.0.0.1:$SPORT/cgi-bin/rxpip_server.rexx?action=PUBLISH")
+expect "a missing scanner program refuses uploads" "$c" "SCANNER_UNAVAILABLE"
+[ -e "$REPO/noscanner" ] && bad "nothing is kept without a scanner" || ok "nothing is kept without a scanner"
+kill $SPID 2>/dev/null
+
+# ============================================================================
+section "likes (recommendations)"
+LK="$BASE?action=LIKE"
+expect "liking needs POST" "$(curl -s -H "X-Rxpip-Name: mathutils" "$LK")" "METHOD_NOT_ALLOWED"
+expect "liking needs a token" "$(curl -s -X POST -H "X-Rxpip-Name: mathutils" "$LK")" "NO_TOKEN"
+like() { curl -s -X POST -H "X-Rxpip-Token: $1" -H "X-Rxpip-Name: $2" "$BASE?action=$3"; }
+expect "the owner cannot recommend their own package" "$(like "$TOKA" mathutils LIKE)" "OWN_PACKAGE"
+expect "an unknown package is not found" "$(like "$TOKB" nosuchpkg LIKE)" "NOT_FOUND"
+expect "a bad name is refused" "$(like "$TOKB" 'a;b' LIKE)" "BAD_NAME"
+out=$(like "$TOKB" mathutils LIKE)
+expect "bob recommends mathutils" "$out" "LIKES: 1"
+expect "and is told he did" "$out" "LIKED: yes"
+expect "liking twice counts once" "$(like "$TOKB" mathutils LIKE)" "LIKES: 1"
+expect "INFO shows the count" "$(get 'action=INFO&name=mathutils')" "LIKES: 1"
+expect "LIST shows the count" "$(get 'action=LIST')" "LIKES: 1"
+expect "INFO tells bob he liked it" "$(curl -s -H "X-Rxpip-Token: $TOKB" "$BASE?action=INFO&name=mathutils")" "LIKED: yes"
+expect_not "anonymous INFO says nothing about who liked" "$(get 'action=INFO&name=mathutils')" "LIKED:"
+expect_not "no user name leaks into the responses" "$(get 'action=LIST')$(get 'action=INFO&name=mathutils')" "bob"
+expect "the web page shows the count" "$(curl -s "$BASE?action=PKG&name=mathutils")" "Recommended by</th><td>1 user"
+expect "the web index has a Likes column" "$(curl -s "$BASE")" "<th>Likes</th>"
+# sorting: strutils-like second package gets 2 likes, mathutils 1
+pub likeb 1.0.0 "$TOKA" "$WORK/strutils.rxpkg"
+adm adduser carol >/dev/null; TOKC=$(adm newtoken carol | sed 's/.*: //')
+like "$TOKB" likeb LIKE >/dev/null; like "$TOKC" likeb LIKE >/dev/null
+first=$(get 'action=LIST&sort=likes' | grep '^NAME:' | head -1)
+[ "$first" = "NAME: likeb" ] && ok "LIST sorts the most recommended first" || bad "LIST sorts the most recommended first" "$first"
+first=$(get 'action=SEARCH&q=&sort=likes' | grep '^NAME:' | head -1)
+[ "$first" = "NAME: likeb" ] && ok "SEARCH sorts by recommendations too" || bad "SEARCH sorts by recommendations too" "$first"
+first=$(curl -s "$BASE?sort=likes" | grep -o '<td><a href="[^"]*name=[a-z0-9]*' | head -1)
+expect "the web index can sort by recommendations" "$first" "name=likeb"
+expect "unliking removes it" "$(like "$TOKB" likeb UNLIKE)" "LIKES: 1"
+expect "unliking again is harmless" "$(like "$TOKB" likeb UNLIKE)" "LIKED: no"
+# private packages: only readers may recommend, and nobody else sees a thing
+pub likepriv 1.0.0 "$TOKA" "$WORK/strutils.rxpkg" -H "X-Rxpip-Visibility: private"
+expect "a private package cannot be recommended by an outsider" "$(like "$TOKB" likepriv LIKE)" "NOT_FOUND"
+curl -s -X POST -H "X-Rxpip-Token: $TOKA" -H "X-Rxpip-Name: likepriv" -H "X-Rxpip-User: bob" "$BASE?action=ADDREADER" >/dev/null
+expect "a reader can recommend it" "$(like "$TOKB" likepriv LIKE)" "LIKES: 1"
+expect_not "the public cannot see it" "$(get 'action=LIST')" "likepriv"
+[ -s "$REPO/.auth/likes/likeb.likes" ] && ok "likes are kept under .auth, not served" || bad "likes are kept under .auth, not served"
+expect "likes show in the statistics log" "$(cat "$REPO"/.stats/*.log)" "|LIKE|likeb|"
 
 # ============================================================================
 section "closed repository (RXPIP_CLOSED=1)"

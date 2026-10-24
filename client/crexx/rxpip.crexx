@@ -89,6 +89,8 @@ main: procedure = .int
     when cmd = 'WHOAMI'    then return cmdWhoami()
     when cmd = 'TOKEN'     then return cmdToken(rest)
     when cmd = 'OWNER'     then return cmdOwner(rest)
+    when cmd = 'LIKE'      then return cmdLike(cmd, rest)
+    when cmd = 'UNLIKE'    then return cmdLike(cmd, rest)
     when cmd = 'VISIBILITY' then return cmdVisibility(rest)
     when cmd = 'READER'    then return cmdReader(rest)
     when cmd = 'HELP'      then call cmdHelp
@@ -110,7 +112,8 @@ cmdHelp: procedure = .void
   say '  list                        list installed packages'
   say '  find [dir...] [--sync]      find installs under dirs (default .), show duplicates/older copies;'
   say '                              --sync brings older copies up to the newest version found'
-  say '  search <term>               search the repository'
+  say '  search [--sort=likes] <term>   search the repository (--sort=likes: most recommended first)'
+  say '  like <pkg> | unlike <pkg>   recommend a package (needs a login; not your own)'
   say '  show <name>                 show repository details for a package'
   say '  freeze                      print installed packages as name==version'
   say '  scan <file.crexx>           install packages named in REQUIRE comments'
@@ -567,12 +570,27 @@ cmdFind: procedure = .void
 cmdSearch: procedure = .void
   arg a = .string[]
   term = ''
+  sortq = ''
   do i = 1 to a.0
-    term = term a[i]
+    if upper(a[i]) = '--SORT=LIKES' then sortq = '&sort=likes'
+    else term = term a[i]
   end
   term = strip(term)
-  call printStanzas(serverGet('SEARCH', 'q=' || urlEnc(term)))
+  call printStanzas(serverGet('SEARCH', 'q=' || urlEnc(term) || sortq))
   return
+
+/* rxpip like <pkg> | unlike <pkg> -- recommend a package (one per user) */
+cmdLike: procedure = .int
+  arg what = .string, a = .string[]
+  pkg = ''
+  if a.0 > 0 then pkg = a[1]
+  if pkg = '' then do
+    say 'usage: rxpip like <package>   |   rxpip unlike <package>'
+    return 1
+  end
+  hdrs = .string[]
+  hdrs[1] = 'X-Rxpip-Name: ' || pkg
+  return showResponse(authCall(what, hdrs))
 
 cmdShow: procedure = .void
   arg a = .string[]
@@ -1255,7 +1273,7 @@ tokenLooksValid: procedure = .int
    the launcher recompiles it on the next start.
    ===================================================================== */
 clientVersion: procedure = .string
-  return '1.4.0'
+  return '1.5.0'
 
 setClientHeader: procedure = .void
   os = 'unknown'
