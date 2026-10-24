@@ -93,6 +93,7 @@ main: procedure = .int
     when cmd = 'UNLIKE'    then return cmdLike(cmd, rest)
     when cmd = 'VISIBILITY' then return cmdVisibility(rest)
     when cmd = 'READER'    then return cmdReader(rest)
+    when cmd = 'VERSION' | cmd = '--VERSION' | cmd = '-V' then say 'rxpip' clientVersion() '(crexx)'
     when cmd = 'HELP'      then call cmdHelp
     otherwise do
       say "rxpip: unknown command '" || cmd || "' -- try 'rxpip help'"
@@ -103,7 +104,7 @@ main: procedure = .int
   return 0
 
 cmdHelp: procedure = .void
-  say 'RXPIP -- the REXX package manager (cREXX client)'
+  say 'RXPIP' clientVersion() '-- the REXX package manager (cREXX client)'
   say ''
   say 'Commands:'
   say '  install [--upgrade] <name>[==version]   install a package (and its deps) into the current'
@@ -1273,7 +1274,7 @@ tokenLooksValid: procedure = .int
    the launcher recompiles it on the next start.
    ===================================================================== */
 clientVersion: procedure = .string
-  return '1.5.0'
+  return '1.5.1'
 
 setClientHeader: procedure = .void
   os = 'unknown'

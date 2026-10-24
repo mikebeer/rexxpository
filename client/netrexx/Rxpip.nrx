@@ -98,6 +98,7 @@ class Rxpip
         when cmd = 'UNLIKE'    then cmdLike(cmd, rest)
         when cmd = 'VISIBILITY' then cmdVisibility(rest)
         when cmd = 'READER'    then cmdReader(rest)
+        when cmd = 'VERSION' | cmd = '--VERSION' | cmd = '-V' then say 'rxpip' clientVersion() '(netrexx)'
         when cmd = 'HELP'      then cmdHelp
         otherwise do
           say "rxpip: unknown command '"cmd"' -- try 'rxpip help'"
@@ -111,7 +112,7 @@ class Rxpip
     exit 0
 
   method cmdHelp static signals IOException,InterruptedException,UnsupportedEncodingException,FileNotFoundException
-    say 'RXPIP -- the REXX package manager (NetRexx client)'
+    say 'RXPIP' clientVersion() '-- the REXX package manager (NetRexx client)'
     say ''
     say 'Commands:'
     say '  install [--upgrade] <name>[==version]   install a package (and its deps) into the current'
@@ -905,7 +906,7 @@ class Rxpip
      client source; the launcher recompiles it on the next start.
      ===================================================================== */
   method clientVersion static returns Rexx
-    return '1.5.0'
+    return '1.5.1'
 
   method clientHeader static returns Rexx
     os = Rexx(System.getProperty('os.name')).lower.word(1)

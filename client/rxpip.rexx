@@ -123,6 +123,7 @@ select
   when cmd = 'LIKE' | cmd = 'UNLIKE' then call CmdLike cmd, rest
   when cmd = 'VISIBILITY' then call CmdVisibility rest
   when cmd = 'READER'    then call CmdReader rest
+  when cmd = 'VERSION' | cmd = '--VERSION' | cmd = '-V' then say 'rxpip' ClientVersion() '(' || ClientKind() || ')'
   when cmd = 'HELP'      then call CmdHelp
   when cmd = ''          then call CmdHelp
   otherwise do
@@ -137,7 +138,7 @@ exit 0
    ======================================================================= */
 
 CmdHelp:
-  say 'RXPIP -- the REXX package manager'
+  say 'RXPIP' ClientVersion() '-- the REXX package manager (' || ClientKind() || ')'
   say ''
   say 'Commands:'
   say '  install [--upgrade] <name>[==version]   install a package (and its deps) into the current'
@@ -172,6 +173,7 @@ CmdHelp:
   say '                              administrator commands (need an administrator token)'
   say '  config get|set <key> [val]  view/change REPO_URL, LIB_DIR, INTERPRETER, AUTOUPDATE, CLIENT_CHECK'
   say '  path                        show the library directory and how to put it on PATH'
+  say '  version                      show the rxpip version'
   say '  help                        this message'
   return
 
@@ -1337,7 +1339,7 @@ RecordInstalled: procedure
    ======================================================================= */
 
 ClientVersion: procedure
-  return '1.5.0'
+  return '1.5.1'
 
 ClientKind: procedure
   if IsOoRexx() then return 'oorexx'
