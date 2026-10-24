@@ -707,7 +707,7 @@ expect "three artifacts now" "$(get 'action=ARTIFACTS&name=treepkg&version=1.0.0
 curl -s "$BASE?action=DOWNLOAD&name=treepkg&version=1.0.0&kind=NATIVE&platform=crexx-linux-x86_64" -o "$WORK/nat_dl.rxpkg"
 cmp -s "$WORK/native_ok.rxpkg" "$WORK/nat_dl.rxpkg" && ok "the native artifact downloads byte-identical" || bad "the native artifact downloads byte-identical"
 # client releases stay flat
-c=$(curl -s -X POST -H "X-Rxpip-Token: $TOKA" -H "X-Rxpip-Kind: regina" -H "X-Rxpip-Version: 1.5.0" --data-binary @"$WORK/tree_ok.rxpkg" "$BASE?action=ADMINCLIENT")
+c=$(curl -s -X POST -H "X-Rxpip-Token: $TOKA" -H "X-Rxpip-Kind: regina" -H "X-Rxpip-Version: 9.9.9" --data-binary @"$WORK/tree_ok.rxpkg" "$BASE?action=ADMINCLIENT")
 expect "client releases must stay flat" "$c" "BAD_ARCHIVE"
 
 # ============================================================================
